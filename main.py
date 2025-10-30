@@ -313,11 +313,16 @@ class Environment:
         next_state = self.robot.get_state(self.obstacles, GRID_WIDTH, GRID_HEIGHT, self.goal)
         _, next_distance_to_goal = next_state
 
-        # Check for goal or collision
-        reached_goal = ((self.robot.x - self.goal[0])**2 + (self.robot.y - self.goal[1])**2) ** 0.5 < 16
+        # Use grid-based distance returned by get_state (units: cells)
+        # Consider reached if <= 1 cell (inclusive)
+        reached_goal = next_distance_to_goal <= 1.0
+
+        # Determine done
         done = reached_goal or collided
 
         if reached_goal:
+            # snap robot to exact goal position to avoid small oscillations
+            self.robot.x, self.robot.y = self.goal
             self.goal_reached_count += 1
         if collided:
             self.collision_count += 1
@@ -344,19 +349,9 @@ class Environment:
         # Update previous distance
         self.prev_distance_to_goal = next_distance_to_goal
 
-        # Reset if goal reached or collision
-        if done:
-            self.reset_count += 1
-            self.reset_episode(reached_goal)
+        print(f"Robot pos: {(self.robot.x, self.robot.y)}, Goal: {self.goal}, dist: {next_distance_to_goal:.2f}, reached_goal: {reached_goal}")
 
-            # Save model periodically during training
-            if self.is_training:
-                current_time = time.time()
-                if current_time - self.last_save_time > 60:  # Save every minute
-                    self.save_model()
-                    self.last_save_time = current_time
-
-        return done
+        return done, reached_goal, collided
 
     def save_model(self):
         """Save model and training statistics"""
@@ -369,32 +364,50 @@ class Environment:
         
         print(f"Model saved at episode {self.episode_count}")
 
-    def plot_metrics(self):
-        """Plot and save training metrics"""
+    def plot_metrics(self, filename=None):
+        """Plot and save training metrics.
+        Nếu filename không cung cấp thì ưu tiên self.run_plot_file (tạo ở train()).
+        """
         plt.figure(figsize=(12, 8))
-        
+
         # Plot rewards
         plt.subplot(2, 1, 1)
         plt.plot(self.total_rewards)
         plt.title('Episode Rewards')
         plt.xlabel('Episode')
         plt.ylabel('Total Reward')
-        
+
         # Plot episode lengths
         plt.subplot(2, 1, 2)
         plt.plot(self.episode_lengths)
         plt.title('Episode Lengths')
         plt.xlabel('Episode')
         plt.ylabel('Steps')
-        
+
         plt.tight_layout()
-        plot_dir = f"plots/{self.name_map}/{self.controller_name}"
-        os.makedirs(plot_dir, exist_ok=True)
-        plt.savefig(f"{plot_dir}/training_metrics_ep{self.episode_count}.png")
+
+        if filename is None:
+            filename = getattr(self, "run_plot_file", None)
+            if filename is None:
+                plot_dir = f"plots/{self.name_map}/{self.controller_name}"
+                os.makedirs(plot_dir, exist_ok=True)
+                filename = f"{plot_dir}/training_metrics_latest.png"
+
+        plt.savefig(filename)
         plt.close()
+        print(f"Saved training plot: {filename}")
 
     def train(self, max_episodes=1000):
         """Run training loop for specified number of episodes"""
+        # --- Tạo folder duy nhất cho lần chạy training này ---
+        plot_root = f"plots/{self.name_map}/{self.controller_name}"
+        os.makedirs(plot_root, exist_ok=True)
+        run_ts = time.strftime("%Y%m%d_%H%M%S")
+        self.run_plot_dir = os.path.join(plot_root, run_ts)
+        os.makedirs(self.run_plot_dir, exist_ok=True)
+        # file sẽ luôn có tên này trong mỗi run (ghi đè nếu plot_metrics được gọi nhiều lần)
+        self.run_plot_file = os.path.join(self.run_plot_dir, "training_metrics_latest.png")
+
         running = True
         started = True
         pause = False
@@ -415,12 +428,26 @@ class Environment:
                         
             # Update environment if started and not paused
             if started and not pause:
-                self.update()
-            
+                done, reached_goal, collided = self.update()
+
+                # Nếu episode kết thúc (về đích hoặc va chạm), reset và lưu thông tin cần thiết
+                if done:
+                    self.reset_count += 1
+
+                    # Gọi reset để cập nhật stats + clear path/history
+                    # (trapped không áp dụng ở training, truyền False)
+                    self.reset_episode(reached_goal=reached_goal, trapped=False)
+
+                    # Save model định kỳ (giữ nguyên cơ chế cũ)
+                    current_time = time.time()
+                    if current_time - self.last_save_time > 60:  # Save every minute
+                        self.save_model()
+                        self.last_save_time = current_time
+
             # Draw environment
             self.draw_environment()
             pygame.display.update()
-            
+
             # Control FPS
             self.clock.tick(self.FPS)
         
@@ -482,7 +509,9 @@ class Environment:
 
         # Khởi tạo đường đi ban đầu
         current_episode_path.append((self.robot.x, self.robot.y))
-        self.state_history.append((self.robot.x, self.robot.y))
+        init_gx = int((self.robot.x - env_padding) // cell_size)
+        init_gy = int((self.robot.y - env_padding) // cell_size)
+        self.state_history.append((init_gx, init_gy))
 
         while running and episode_count < episodes:
             # Xử lý sự kiện
@@ -494,45 +523,49 @@ class Environment:
             old_x, old_y = self.robot.x, self.robot.y
 
             # Cập nhật môi trường
-            done = self.update()
+            done, reached_goal, collided = self.update()
             current_steps += 1
+
+            # Lưu tọa độ lưới thay vì pixel để tránh so sánh float
+            grid_x = int((self.robot.x - env_padding) // cell_size)
+            grid_y = int((self.robot.y - env_padding) // cell_size)
+            current_grid_state = (grid_x, grid_y)
 
             # Kiểm tra nếu robot đã di chuyển, thêm vị trí mới vào đường đi và lịch sử trạng thái
             if (self.robot.x, self.robot.y) != (old_x, old_y):
                 current_episode_path.append((self.robot.x, self.robot.y))
-                self.state_history.append((self.robot.x, self.robot.y))
-                # Giới hạn kích thước lịch sử trạng thái
+                # append grid state (ints) — để đếm lặp ổn định
+                self.state_history.append(current_grid_state)
                 if len(self.state_history) > 100:
                     self.state_history.pop(0)
             else:
                 print(f"Bị kẹt tại: {self.robot.x}, {self.robot.y}.")
 
-            # Kiểm tra chu kỳ trạng thái (bẫy)
+            # Kiểm tra chu kỳ trạng thái (bẫy) — CHỈ khi chưa reach goal và chưa va chạm
             trapped = False
-            if len(self.state_history) >= 10:  # Chỉ kiểm tra khi có đủ trạng thái
-                current_state = (self.robot.x, self.robot.y)
-                state_counts = self.state_history.count(current_state)
+            if not reached_goal and not collided and len(self.state_history) >= 10:
+                state_counts = self.state_history.count(current_grid_state)
                 if state_counts >= 3:  # Lặp lại 3 lần được coi là bẫy
                     trapped = True
                     self.trap_count += 1
                     done = True
-                    # print(f"Robot rơi vào bẫy tại: {self.robot.x}, {self.robot.y}")
 
             if done:
                 # Lưu đường đi của episode hiện tại vào file
                 with open(result_file, "a") as f:
-                    f.write(f"# Episode {episode_count + 1}{' (Trapped)' if trapped else ''}\n")
+                    outcome = "Trapped" if trapped else ("Goal" if reached_goal else "Collision")
+                    f.write(f"# Episode {episode_count + 1} ({outcome})\n")
                     for x, y in current_episode_path:
-                        # Chuyển đổi tọa độ pixel sang tọa độ lưới
-                        grid_x = int((x - env_padding) // cell_size)
-                        grid_y = int((y - env_padding) // cell_size)
-                        f.write(f"[{grid_x},{grid_y}], ")
+                        gx = int((x - env_padding) // cell_size)
+                        gy = int((y - env_padding) // cell_size)
+                        f.write(f"[{gx},{gy}], ")
                     f.write("\n")  # Dòng trống giữa các episode
 
                 # Reset đường đi và lịch sử trạng thái cho episode tiếp theo
                 current_episode_path = [(self.start[0], self.start[1])]
-                self.reset_episode(reached_goal=done and not trapped and not self.collision_count, trapped=trapped)
-                
+                # Gọi reset 1 lần tại đây — truyền reached_goal chính xác và trapped flag
+                self.reset_episode(reached_goal=reached_goal, trapped=trapped)
+
                 episode_count += 1
                 steps_per_episode.append(current_steps)
                 current_steps = 0
