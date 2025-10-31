@@ -7,6 +7,7 @@ from Robot import Robot
 from Obstacle import Obstacle
 from controller.Controller import Controller
 from controller.DQNController import DQNController
+from controller.ImprovedDQNController import ImprovedDQNController
 from controller.DFQL import DFQLController
 from controller.DWAController import DWAController
 from controller.DQN_PER_MTS import DQNPMController
@@ -33,6 +34,7 @@ def select_controller():
         4: "DQNPMController",
         5: "SDQNController",
         6: "TransformerDQNController",
+        7: "ImprovedDQNController"
     }
     
     for idx, name in controllers.items():
@@ -165,6 +167,13 @@ class Environment:
             self.controller = DWAController(self.goal, cell_size, env_padding, is_training=self.is_training, model_path=self.model_path)
         elif self.controller_name == "TransformerDQNController":
             self.controller = TransformerDQNController(self.goal, cell_size, env_padding, is_training=self.is_training, model_path=self.model_path)
+        elif self.controller_name == "ImprovedDQNController":
+            self.controller = ImprovedDQNController(
+                self.goal, cell_size, env_padding,
+                GRID_WIDTH, GRID_HEIGHT,
+                is_training=self.is_training,
+                model_path=self.model_path
+            )
         else:
             # Default to ClassicalQL if controller not found
             print(f"Warning: Controller {self.controller_name} not recognized. Using ClassicalQL as default.")
@@ -208,7 +217,7 @@ class Environment:
             self.episode_steps = 0
             
             # Update epsilon
-            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController"]:
+            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController"]:
                 self.controller.update_epsilon()
             else:
                 if reached_goal:
