@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import pygame
 import torch.nn as nn
 import torch.optim as optim
 import random
@@ -196,11 +197,31 @@ class TransformerDuelingDQN(nn.Module):
 # Controller Chính
 # ==============================================================================
 class TransformerDQNController(Controller):
-    def __init__(self, goal, cell_size, env_padding, is_training=True, model_path="transformer_dqn_model.pth"):
+    def __init__(self, goal, cell_size, env_padding, grid_width, grid_height, is_training=True, model_path="transformer_dqn_model.pth"):
+        self.grid_width = grid_width
+        self.grid_height = grid_height
         super().__init__(goal, cell_size, env_padding, is_training, model_path)
         self._initialize_algorithm()
         if not self.is_training:
             self.load_model()
+
+    def _get_valid_action_mask(self, robot, obstacles):
+        mask = [True] * self.action_dim
+        for i, direction in enumerate(self.directions):
+            next_x = robot.x + direction[0] * self.cell_size
+            next_y = robot.y + direction[1] * self.cell_size
+            
+            if not (self.env_padding <= next_x < self.env_padding + self.grid_width * self.cell_size and
+                    self.env_padding <= next_y < self.env_padding + self.grid_height * self.cell_size):
+                mask[i] = False
+                continue
+            
+            for obs in obstacles:
+                obstacle_rect = pygame.Rect(obs.x, obs.y, obs.width, obs.height)
+                if obs.static and obstacle_rect.colliderect(pygame.Rect(next_x - robot.radius, next_y - robot.radius, robot.radius*2, robot.radius*2)):
+                    mask[i] = False
+                    break
+        return mask
 
     def _initialize_algorithm(self):
         print("Initializing Controller with Transformer, PER, and Multi-Step DDQN...")
@@ -219,8 +240,8 @@ class TransformerDQNController(Controller):
         # Hyperparameters
         self.gamma = 0.99
         self.epsilon = 1.0 if self.is_training else 0.0
-        self.epsilon_min = 0.02
-        self.epsilon_decay = 0.999 # Giảm epsilon chậm hơn một chút
+        self.epsilon_min = 0.1
+        self.epsilon_decay = 0.9998 # Giảm epsilon chậm hơn một chút
         self.batch_size = 64
         self.target_update_freq = 250 # Cập nhật target network chậm hơn
         self.step_count = 0
@@ -245,7 +266,7 @@ class TransformerDQNController(Controller):
         self.curiosity_factor = 0.1
 
     def make_decision(self, robot, obstacles):
-        state, distance_to_goal = robot.get_state(obstacles, 32, 32, self.goal)
+        state, distance_to_goal = robot.get_state(obstacles, self.grid_width, self.grid_height, self.goal)
         state_flat = state.flatten()
         combined_state = np.concatenate([state_flat, [distance_to_goal]])
 
@@ -261,18 +282,20 @@ class TransformerDQNController(Controller):
         sequence = np.array(padded_sequence)
         state_tensor = torch.FloatTensor(sequence).unsqueeze(0).to(self.device)
 
-        if self.is_training:
-            self.q_network.train()
-        else:
-            self.q_network.eval()
+        # Lấy action mask
+        valid_mask = self._get_valid_action_mask(robot, obstacles)
 
-        if random.random() < self.epsilon and self.is_training:
-            action_idx = random.randint(0, self.action_dim - 1)
+        if self.is_training and random.random() < self.epsilon:
+            valid_indices = [i for i, v in enumerate(valid_mask) if v]
+            action_idx = random.choice(valid_indices) if valid_indices else random.randint(0, self.action_dim - 1)
         else:
             with torch.no_grad():
-                # Lệnh gọi mạng giờ đơn giản hơn, không cần hidden_state
+                self.q_network.eval()
                 q_values = self.q_network(state_tensor)
+                invalid_actions = torch.tensor([not v for v in valid_mask], dtype=torch.bool).to(self.device)
+                q_values[0][invalid_actions] = -1e8
                 action_idx = q_values.argmax().item()
+                self.q_network.train()
 
         return self.directions[action_idx]
 
@@ -382,11 +405,23 @@ class TransformerDQNController(Controller):
         self.position_history_list.append(position)
         if len(self.position_history_list) > self.position_memory_size:
             old_pos = self.position_history_list.pop(0)
-            self.position_history[old_pos] -= 1
-            if self.position_history[old_pos] <= 0:
-                del self.position_history[old_pos]
+            if old_pos in self.position_history:
+                self.position_history[old_pos] -= 1
+                if self.position_history[old_pos] <= 0:
+                    del self.position_history[old_pos]
         
-        repetition_penalty = min(-2 * (self.position_history.get(position, 1) - 1), 0)
+        # SỬA: Tăng cường độ phạt lặp lại một cách mạnh mẽ
+        repetition_penalty = -3.0 * (self.position_history.get(position, 1) - 1)
+        
+        # MỚI: Thêm hình phạt cho sự trì trệ (Stagnation Penalty)
+        stagnation_penalty = 0
+        history_length = 25 # Xem xét 25 bước đi gần nhất
+        if len(self.position_history_list) > history_length:
+            recent_history = self.position_history_list[-history_length:]
+            num_unique_positions = len(set(recent_history))
+            # Nếu robot chỉ loanh quanh ở 5 ô hoặc ít hơn, phạt rất nặng
+            if num_unique_positions <= 5:
+                stagnation_penalty = -5.0
         
         if position in self.visit_counts:
             self.visit_counts[position] += 1
@@ -395,18 +430,18 @@ class TransformerDQNController(Controller):
         curiosity_reward = self.curiosity_factor / max(1, self.visit_counts[position]**0.5)
 
         if reached_goal:
-            return 100 + curiosity_reward
+            return 100.0
         if robot.check_collision(obstacles):
-            return -50
+            return -50.0
         
         if prev_distance is not None:
             progress_reward = (prev_distance - distance_to_goal) * 10
             step_penalty = -0.1
             if distance_to_goal > prev_distance:
                 progress_reward -= 5
-            return progress_reward + step_penalty + repetition_penalty + curiosity_reward
+            return progress_reward + step_penalty + repetition_penalty + curiosity_reward + stagnation_penalty
         
-        return -0.1 - (distance_to_goal * 0.05) + repetition_penalty + curiosity_reward
+        return -0.1 - (distance_to_goal * 0.05) + repetition_penalty + curiosity_reward + stagnation_penalty
 
     def save_model(self):
         torch.save(self.q_network.state_dict(), self.model_path)

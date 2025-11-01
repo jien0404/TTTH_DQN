@@ -116,6 +116,14 @@ class Environment:
         self.episode_reward = 0
         self.episode_steps = 0
         self.last_save_time = time.time()
+        self.best_avg_reward = float('-inf')  # Khởi tạo với giá trị âm vô cùng
+        model_dir = os.path.dirname(self.model_path)
+        
+        # Tạo timestamp duy nhất cho lần chạy này
+        run_timestamp = time.strftime("%Y%m%d_%H%M%S")
+        # Thêm timestamp vào tên file best_model
+        best_model_filename = f"best_model_{run_timestamp}.pth"
+        self.best_model_path = os.path.join(model_dir, best_model_filename)
         
         # Clock for FPS control
         self.clock = pygame.time.Clock()
@@ -166,7 +174,12 @@ class Environment:
             self.is_training = False  # DWAController only runs in test mode
             self.controller = DWAController(self.goal, cell_size, env_padding, is_training=self.is_training, model_path=self.model_path)
         elif self.controller_name == "TransformerDQNController":
-            self.controller = TransformerDQNController(self.goal, cell_size, env_padding, is_training=self.is_training, model_path=self.model_path)
+            self.controller = TransformerDQNController(
+                self.goal, cell_size, env_padding,
+                GRID_WIDTH, GRID_HEIGHT,
+                is_training=self.is_training,
+                model_path=self.model_path
+            )
         elif self.controller_name == "ImprovedDQNController":
             self.controller = ImprovedDQNController(
                 self.goal, cell_size, env_padding,
@@ -210,6 +223,30 @@ class Environment:
         if self.is_training:
             self.total_rewards.append(self.episode_reward)
             self.episode_lengths.append(self.episode_steps)
+            # 1. Định nghĩa khoảng thời gian kiểm tra (ví dụ: mỗi 100 episodes)
+            check_interval = 100
+            
+            # 2. Chỉ thực hiện kiểm tra khi đến lúc
+            if self.episode_count > 0 and self.episode_count % check_interval == 0:
+                reward_window = 100 # Vẫn tính trung bình trên 100 episode cuối
+                
+                # Đảm bảo có đủ dữ liệu để tính trung bình
+                if len(self.total_rewards) >= reward_window:
+                    current_avg_reward = np.mean(self.total_rewards[-reward_window:])
+                    
+                    print(f"\n--- Checking performance at Episode {self.episode_count} ---")
+                    print(f"Current Avg Reward (100 eps): {current_avg_reward:.2f}")
+                    print(f"Best Avg Reward so far: {self.best_avg_reward:.2f}")
+
+                    # 3. Nếu hiệu suất hiện tại là tốt nhất, LƯU LẠI
+                    if current_avg_reward > self.best_avg_reward:
+                        print(f"--- New Best Found! Saving best model... ---")
+                        self.best_avg_reward = current_avg_reward
+                        self.save_best_model()
+                    else:
+                        print("--- No improvement. Continuing training. ---")
+            
+            # --- KẾT THÚC KHỐI LOGIC LƯU MODEL TỐI ƯU ---
             
             # Reset episode stats
             self.episode_count += 1
@@ -449,7 +486,7 @@ class Environment:
 
                     # Save model định kỳ (giữ nguyên cơ chế cũ)
                     current_time = time.time()
-                    if current_time - self.last_save_time > 60:  # Save every minute
+                    if current_time - self.last_save_time > 1000:  # Save every 15 minute
                         self.save_model()
                         self.last_save_time = current_time
 
@@ -494,6 +531,15 @@ class Environment:
                 f.write(f"{grid_x},{grid_y}\n")
 
         print(f"Đã lưu đường đi vào {filename}")
+
+    def save_best_model(self):
+        """Lưu trạng thái model hiện tại vào đường dẫn của model tốt nhất."""
+        # Tạm thời thay đổi đường dẫn lưu của controller, lưu, rồi trả lại như cũ
+        # để không ảnh hưởng đến việc lưu model mới nhất.
+        original_path = self.controller.model_path
+        self.controller.model_path = self.best_model_path
+        self.controller.save_model()
+        self.controller.model_path = original_path # Phục hồi đường dẫn gốc
 
     def test(self, name_map, episodes=10):
         """Chạy vòng lặp kiểm thử với số lượng episodes cụ thể"""

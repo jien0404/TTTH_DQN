@@ -118,8 +118,8 @@ class ImprovedDQNController(Controller):
         
         self.gamma = 0.99
         self.epsilon = 1.0 if self.is_training else 0.0
-        self.epsilon_min = 0.01 # SỬA: Giảm epsilon_min để tăng khả năng khai thác khi đã học tốt
-        self.epsilon_decay = 0.999 # SỬA: Giảm chậm hơn một chút
+        self.epsilon_min = 0.05 # SỬA: Giảm epsilon_min để tăng khả năng khai thác khi đã học tốt
+        self.epsilon_decay = 0.9995 # SỬA: Giảm chậm hơn một chút
         self.batch_size = 64
         
         self.memory = PrioritizedReplayBuffer(capacity=20000, alpha=0.6) # SỬA: Tăng capacity
@@ -255,7 +255,18 @@ class ImprovedDQNController(Controller):
                 if self.position_history[old] <= 0:
                     del self.position_history[old]
         
-        repetition_penalty = min(-0.5 * (self.position_history.get(position, 1) - 1), 0)
+        repetition_penalty = -2.0 * (self.position_history.get(position, 1) - 1)
+
+        stagnation_penalty = 0
+        history_length = 20 # Xem xét 20 bước đi gần nhất
+        if len(self.position_history_list) > history_length:
+            # Lấy 20 vị trí cuối cùng
+            recent_history = self.position_history_list[-history_length:]
+            # Đếm số lượng vị trí duy nhất
+            num_unique_positions = len(set(recent_history))
+            # Nếu robot chỉ loanh quanh ở 3-4 ô, phạt nó
+            if num_unique_positions <= 4:
+                stagnation_penalty = -5.0
         
         if position in self.visit_counts:
             self.visit_counts[position] += 1
@@ -273,9 +284,9 @@ class ImprovedDQNController(Controller):
             step_penalty = -0.1
             if distance_to_goal > prev_distance:
                 progress_reward -= 2.0
-            return progress_reward + step_penalty + repetition_penalty + curiosity_reward
+            return progress_reward + step_penalty + repetition_penalty + curiosity_reward + stagnation_penalty
         
-        return -0.1 - (distance_to_goal * 0.05) + repetition_penalty + curiosity_reward
+        return -0.1 - (distance_to_goal * 0.05) + repetition_penalty + curiosity_reward + stagnation_penalty
 
     # SỬA: Đổi tên hàm để tương thích với base class Controller
     def save_model(self):
