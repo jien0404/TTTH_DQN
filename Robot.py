@@ -14,6 +14,7 @@ class Robot:
         self.vision = vision
         self.radius = radius
         self.direction = (0, 0)
+        self.last_move_vector = np.array([0, 0])
 
     def move(self, obstacles, grid_width, grid_height):
         self.direction = self.controller.make_decision(self, obstacles)
@@ -48,7 +49,13 @@ class Robot:
             # self.x, self.y = old_x, old_y
             return True  # Báo hiệu va chạm
 
+        self.last_move_vector = np.array([self.x - old_x, self.y - old_y])
+
         return False  # Không có va chạm
+    
+    def get_last_move(self):
+        """Trả về vector di chuyển của bước gần nhất."""
+        return self.last_move_vector
 
     def is_diagonal_move(self, dx, dy):
         """Kiểm tra xem di chuyển có phải là diagonal không"""
