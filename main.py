@@ -14,6 +14,7 @@ from controller.DWAController import DWAController
 from controller.DQN_PER_MTS import DQNPMController
 from controller.SDQN import SDQNController
 from controller.TransformerController import TransformerDQNController
+from controller.UltimateDQNController import UltimateDQNController
 from Colors import *
 from MapData import maps
 
@@ -36,7 +37,8 @@ def select_controller():
         5: "SDQNController",
         6: "TransformerDQNController",
         7: "ImprovedDQNController",
-        8:"AdvancedDQNController",
+        8: "AdvancedDQNController",
+        9: "UltimateDQNController"
     }
     
     for idx, name in controllers.items():
@@ -194,6 +196,13 @@ class Environment:
                 self.goal, cell_size, env_padding,is_training=self.is_training,
                 model_path=self.model_path
             )
+        elif self.controller_name == "UltimateDQNController":
+            self.controller = UltimateDQNController(
+                self.goal, cell_size, env_padding,
+                GRID_WIDTH, GRID_HEIGHT, 
+                is_training=self.is_training,
+                model_path=self.model_path
+            )
         else:
             # Default to ClassicalQL if controller not found
             print(f"Warning: Controller {self.controller_name} not recognized. Using ClassicalQL as default.")
@@ -261,7 +270,7 @@ class Environment:
             self.episode_steps = 0
             
             # Update epsilon
-            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController"]:
+            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController", "UltimateDQNController"]:
                 self.controller.update_epsilon()
             else:
                 if reached_goal:
