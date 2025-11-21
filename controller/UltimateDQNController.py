@@ -136,7 +136,7 @@ class UltimateDQNController(Controller):
         self.intrinsic_reward_scale = 0.01 # Hệ số cho phần thưởng tò mò
         
         self.gamma = 0.99
-        self.epsilon = 1.0; self.epsilon_min = 0.05; self.epsilon_decay = 0.9998 # Giảm epsilon rất chậm
+        self.epsilon = 1.0; self.epsilon_min = 0.05; self.epsilon_decay = 0.9999 # Giảm epsilon rất chậm
         self.batch_size = 128 # Tăng batch size
         self.target_update_freq = 200
         
