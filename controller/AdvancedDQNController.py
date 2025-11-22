@@ -367,10 +367,17 @@ class AdvancedDQNController(Controller):
         }, self.model_path)
 
     def _load_model_implementation(self):
-        if os.path.exists(self.model_path):
-            ckpt = torch.load(self.model_path, map_location=self.device)
+        ckpt = torch.load(self.model_path, map_location=self.device)
+
+        # case: checkpoint mới
+        if 'q_network' in ckpt:
+            print("Loading full checkpoint...")
             self.q_network.load_state_dict(ckpt['q_network'])
-            self.target_network.load_state_dict(ckpt['q_network'])
-            if self.is_training and 'optimizer' in ckpt:
-                self.optimizer.load_state_dict(ckpt['optimizer'])
-            self.q_network.eval()
+            self.target_network.load_state_dict(ckpt['target_network'])
+            self.optimizer.load_state_dict(ckpt['optimizer'])
+            return
+
+        # case: checkpoint cũ chỉ có state_dict
+        print("Loading legacy checkpoint (state_dict only)...")
+        self.q_network.load_state_dict(ckpt)
+        self.target_network.load_state_dict(ckpt)
