@@ -353,15 +353,18 @@ class AdvancedDQNController(Controller):
         goal_grid = (int(self.goal[0] // self.cell_size), int(self.goal[1] // self.cell_size))
         self.recent_positions.append(robot_grid)
 
-        # Build obstacle set for A*
+        # Build obstacle set for A* - RELAXED for narrow passages
         obstacle_set = set()
         for obs in obstacles:
             if obs.static:
                 obs_grid_x = int(obs.x // self.cell_size)
                 obs_grid_y = int(obs.y // self.cell_size)
-                # Add obstacle cells with some padding
-                for dx in range(-1, int(obs.width // self.cell_size) + 2):
-                    for dy in range(-1, int(obs.height // self.cell_size) + 2):
+                obs_width_cells = int(obs.width // self.cell_size)
+                obs_height_cells = int(obs.height // self.cell_size)
+
+                # Only add the actual obstacle cells, no padding
+                for dx in range(obs_width_cells + 1):
+                    for dy in range(obs_height_cells + 1):
                         obstacle_set.add((obs_grid_x + dx, obs_grid_y + dy))
 
         # Get A* path suggestion
@@ -382,12 +385,12 @@ class AdvancedDQNController(Controller):
         # Action masking
         valid_mask = self._get_valid_action_mask(robot, obstacles)
 
-        # Penalize recently visited positions in action selection
+        # Penalize recently visited positions - RELAXED threshold
         for i, direction in enumerate(self.directions):
             next_pos = (robot_grid[0] + direction[0], robot_grid[1] + direction[1])
-            # Count how many times this position appears in recent history
+            # Only block if visited 5+ times (was 3+)
             recent_count = sum(1 for p in self.recent_positions if p == next_pos)
-            if recent_count >= 3:  # If visited 3+ times recently, discourage
+            if recent_count >= 5:
                 valid_mask[i] = False
 
         # Decision making
@@ -397,12 +400,15 @@ class AdvancedDQNController(Controller):
 
             # Hybrid decision: A* + DQN
             if random.random() < self.epsilon:
-                # Epsilon exploration
-                valid_indices = [i for i, v in enumerate(valid_mask) if v]
-                if valid_indices:
-                    action_idx = random.choice(valid_indices)
+                # Epsilon exploration - prefer A* suggestion if valid
+                if astar_action is not None and valid_mask[astar_action] and random.random() < 0.7:
+                    action_idx = astar_action
                 else:
-                    action_idx = random.randint(0, self.action_dim - 1)
+                    valid_indices = [i for i, v in enumerate(valid_mask) if v]
+                    if valid_indices:
+                        action_idx = random.choice(valid_indices)
+                    else:
+                        action_idx = random.randint(0, self.action_dim - 1)
             else:
                 # Exploit: blend A* and DQN
                 with torch.no_grad():
@@ -418,7 +424,7 @@ class AdvancedDQNController(Controller):
                 else:
                     action_idx = dqn_action
         else:
-            # Inference mode
+            # Inference mode - trust the trained model more
             self.q_network.eval()
             with torch.no_grad():
                 q_values = self.q_network(state_tensor)
@@ -432,6 +438,7 @@ class AdvancedDQNController(Controller):
     def _get_valid_action_mask(self, robot, obstacles):
         """Prevent invalid actions (collision with walls/obstacles)"""
         mask = [True] * self.action_dim
+
         for i, direction in enumerate(self.directions):
             next_x = robot.x + direction[0] * self.cell_size
             next_y = robot.y + direction[1] * self.cell_size
@@ -442,12 +449,19 @@ class AdvancedDQNController(Controller):
                 mask[i] = False
                 continue
 
-            # Check static obstacle collision
+            # Check static obstacle collision - RELAXED
+            # Create a smaller collision rect to allow tighter navigation
+            collision_margin = robot.radius * 0.8  # Reduce from full radius to 80%
+            robot_next_rect = pygame.Rect(
+                next_x - collision_margin,
+                next_y - collision_margin,
+                collision_margin * 2,
+                collision_margin * 2
+            )
+
             for obs in obstacles:
                 if obs.static:
                     obstacle_rect = pygame.Rect(obs.x, obs.y, obs.width, obs.height)
-                    robot_next_rect = pygame.Rect(next_x - robot.radius, next_y - robot.radius, robot.radius * 2,
-                                                  robot.radius * 2)
                     if obstacle_rect.colliderect(robot_next_rect):
                         mask[i] = False
                         break
@@ -551,64 +565,63 @@ class AdvancedDQNController(Controller):
                 if self.position_history[old] <= 0:
                     del self.position_history[old]
 
-        # ENHANCED: Repetition penalty (very strong to break loops)
+        # RELAXED: Repetition penalty (less aggressive)
         repetition_count = self.position_history.get(position, 1) - 1
-        repetition_penalty = -10.0 * min(repetition_count, 5) if repetition_count > 1 else 0
+        repetition_penalty = -5.0 * min(repetition_count, 5) if repetition_count > 3 else 0  # Changed from >1 to >3
 
-        # ENHANCED: Stagnation penalty (prevent tight loops)
+        # RELAXED: Stagnation penalty
         stagnation_penalty = 0
-        history_length = 20
+        history_length = 25  # Changed from 20 to 25
         if len(self.position_history_list) > history_length:
             recent_history = self.position_history_list[-history_length:]
             num_unique_positions = len(set(recent_history))
-            # If stuck in small area (< 6 unique positions in 20 steps)
-            if num_unique_positions <= 5:
-                stagnation_penalty = -15.0
-            elif num_unique_positions <= 8:
-                stagnation_penalty = -8.0
+            # More lenient thresholds
+            if num_unique_positions <= 3:  # Changed from 5 to 3
+                stagnation_penalty = -12.0
+            elif num_unique_positions <= 5:  # Changed from 8 to 5
+                stagnation_penalty = -6.0
 
-        # Back-and-forth penalty
+        # Back-and-forth penalty (keep this)
         backforth_penalty = 0
         if len(self.position_history_list) >= 4:
             last_4 = self.position_history_list[-4:]
-            # Check if oscillating between 2 positions
             if len(set(last_4)) <= 2:
-                backforth_penalty = -12.0
+                backforth_penalty = -10.0
 
-        # Curiosity reward
+        # Curiosity reward - INCREASED to encourage exploration
         if position in self.visit_counts:
             self.visit_counts[position] += 1
         else:
             self.visit_counts[position] = 1
-        curiosity_reward = self.curiosity_factor / (self.visit_counts[position] ** 0.5)
+        curiosity_reward = self.curiosity_factor * 2.0 / (self.visit_counts[position] ** 0.5)  # Doubled
 
         # Goal reached - BIG reward with time bonus
         if reached_goal:
             time_bonus = max(0, 200 - self.episode_steps * 0.5)
             return 300.0 + time_bonus + curiosity_reward
 
-        # Collision penalty
+        # Collision penalty - RELAXED slightly
         if robot.check_collision(obstacles):
-            return -150.0
+            return -80.0  # Changed from -150 to -80
 
         # Progress reward (ENHANCED)
         if prev_distance is not None:
             progress = prev_distance - distance_to_goal
-            # Strong reward for moving toward goal, strong penalty for moving away
-            progress_reward = progress * 25.0 if progress > 0 else progress * 20.0
+            # Strong reward for moving toward goal
+            progress_reward = progress * 30.0 if progress > 0 else progress * 15.0  # Increased forward reward
 
-            # Distance-based shaping (encourage being closer to goal)
-            distance_reward = -distance_to_goal * 0.03
+            # Distance-based shaping
+            distance_reward = -distance_to_goal * 0.02
 
-            # Time penalty (encourage faster completion)
-            step_penalty = -0.2
+            # Time penalty (lighter)
+            step_penalty = -0.1  # Changed from -0.2 to -0.1
 
             self.steps_since_goal += 1
 
             return (progress_reward + distance_reward + step_penalty +
                     repetition_penalty + curiosity_reward + stagnation_penalty + backforth_penalty)
 
-        return -0.1 + curiosity_reward + repetition_penalty + stagnation_penalty
+        return -0.05 + curiosity_reward + repetition_penalty + stagnation_penalty  # Changed from -0.1 to -0.05
 
     def save_model(self):
         """Save complete checkpoint"""
