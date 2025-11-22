@@ -3,381 +3,428 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
-from collections import deque, namedtuple
-import os
+from collections import deque
 from controller.Controller import Controller
+import heapq
 
-# ---------------- Noisy Linear (Fortunato) ------------------
+
+# ---------------- Dueling DQN with Noisy Layers ------------------
 class NoisyLinear(nn.Module):
-    def __init__(self, in_features, out_features, sigma_init=0.017, bias=True):
-        super().__init__()
+    def __init__(self, in_features, out_features, std_init=0.5):
+        super(NoisyLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.sigma_init = sigma_init
+        self.std_init = std_init
 
-        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
-        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
-        if bias:
-            self.bias_mu = nn.Parameter(torch.empty(out_features))
-            self.bias_sigma = nn.Parameter(torch.empty(out_features))
-        else:
-            self.register_parameter('bias_mu', None)
-            self.register_parameter('bias_sigma', None)
+        self.weight_mu = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        self.register_buffer('weight_epsilon', torch.FloatTensor(out_features, in_features))
 
-        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
-        if bias:
-            self.register_buffer('bias_epsilon', torch.empty(out_features))
+        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features))
+        self.bias_sigma = nn.Parameter(torch.FloatTensor(out_features))
+        self.register_buffer('bias_epsilon', torch.FloatTensor(out_features))
 
         self.reset_parameters()
         self.reset_noise()
 
     def reset_parameters(self):
-        mu_range = 1. / np.sqrt(self.in_features)
+        mu_range = 1 / np.sqrt(self.in_features)
         self.weight_mu.data.uniform_(-mu_range, mu_range)
-        self.weight_sigma.data.fill_(self.sigma_init)
-
-        if self.bias_mu is not None:
-            self.bias_mu.data.uniform_(-mu_range, mu_range)
-            self.bias_sigma.data.fill_(self.sigma_init)
+        self.weight_sigma.data.fill_(self.std_init / np.sqrt(self.in_features))
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.std_init / np.sqrt(self.out_features))
 
     def reset_noise(self):
-        epsilon_in = self._f(torch.randn(self.in_features, device=self.weight_mu.device))
-        epsilon_out = self._f(torch.randn(self.out_features, device=self.weight_mu.device))
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
         self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
-        if self.bias_mu is not None:
-            self.bias_epsilon.copy_(epsilon_out)
+        self.bias_epsilon.copy_(epsilon_out)
 
-    @staticmethod
-    def _f(x):
-        return x.sign() * x.abs().sqrt()
+    def _scale_noise(self, size):
+        x = torch.randn(size)
+        return x.sign().mul_(x.abs().sqrt_())
 
-    def forward(self, input):
+    def forward(self, x):
         if self.training:
             weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
-            if self.bias_mu is not None:
-                bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
-            else:
-                bias = None
+            bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
         else:
             weight = self.weight_mu
-            bias = self.bias_mu if self.bias_mu is not None else None
-        return nn.functional.linear(input, weight, bias)
+            bias = self.bias_mu
+        return nn.functional.linear(x, weight, bias)
 
 
-# ---------------- Dueling DQN (with optional Noisy) ------------------
 class DuelingDQN(nn.Module):
-    def __init__(self, input_dim, output_dim, use_noisy=False):
-        super().__init__()
-        Linear = NoisyLinear if use_noisy else nn.Linear
-        self.use_noisy = use_noisy
-
+    def __init__(self, input_dim, output_dim):
+        super(DuelingDQN, self).__init__()
         self.feature = nn.Sequential(
-            Linear(input_dim, 256),
+            nn.Linear(input_dim, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
-            Linear(256, 256),
+            nn.Dropout(0.2),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.ReLU()
         )
         self.value_stream = nn.Sequential(
-            Linear(256, 128),
+            NoisyLinear(128, 64),
             nn.ReLU(),
-            Linear(128, 1)
+            NoisyLinear(64, 1)
         )
         self.advantage_stream = nn.Sequential(
-            Linear(256, 128),
+            NoisyLinear(128, 64),
             nn.ReLU(),
-            Linear(128, output_dim)
+            NoisyLinear(64, output_dim)
         )
 
     def forward(self, x):
-        f = self.feature(x)
-        v = self.value_stream(f)
-        a = self.advantage_stream(f)
-        return v + a - a.mean(1, keepdim=True)
+        x = self.feature(x)
+        value = self.value_stream(x)
+        advantage = self.advantage_stream(x)
+        q = value + advantage - advantage.mean(dim=1, keepdim=True)
+        return q
 
     def reset_noise(self):
-        if not self.use_noisy:
-            return
-        for m in self.modules():
-            if isinstance(m, NoisyLinear):
-                m.reset_noise()
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.reset_noise()
 
 
-# ---------------- Prioritized Replay Buffer ------------------
-class PrioritizedReplayBuffer:
-    def __init__(self, capacity, alpha=0.6):
-        self.capacity = int(capacity)
-        self.buffer = []
-        self.pos = 0
-        self.priorities = np.zeros((self.capacity,), dtype=np.float32)
-        self.alpha = alpha
-        self.experience = namedtuple('Experience',
-                                     field_names=['state','action','reward','next_state','done'])
+# ---------------- Improved Hybrid A* ------------------
+class HybridAStar:
+    def __init__(self, grid_size=(32, 32)):
+        self.grid_w, self.grid_h = grid_size
+        self.cache = {}
+        self.cache_hits = 0
 
-    def add(self, state, action, reward, next_state, done):
-        e = self.experience(state, action, reward, next_state, done)
-        max_prio = self.priorities.max() if self.buffer else 1.0
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(e)
-        else:
-            self.buffer[self.pos] = e
-        self.priorities[self.pos] = max_prio
-        self.pos = (self.pos + 1) % self.capacity
+    def heuristic(self, x1, y1, x2, y2):
+        # Euclidean distance is better than Manhattan for diagonal movement
+        return np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
 
-    def sample(self, batch_size, beta, device):
-        if len(self.buffer) == 0:
-            raise ValueError("Buffer is empty")
+    def neighbors(self, x, y):
+        # Prioritize straight moves over diagonal
+        dirs = [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+        for i, (dx, dy) in enumerate(dirs):
+            cost = 1.414 if i >= 4 else 1.0  # diagonal costs more
+            yield x + dx, y + dy, cost
 
-        prios = self.priorities if len(self.buffer) == self.capacity else self.priorities[:self.pos]
-        probs = prios ** self.alpha
-        probs_sum = probs.sum()
-        if probs_sum == 0:
-            probs = np.ones_like(probs) / probs.size
-        else:
-            probs /= probs_sum
+    def find_path(self, start, goal, obstacle_set):
+        # Cache check
+        cache_key = (start, goal, frozenset(obstacle_set))
+        if cache_key in self.cache:
+            self.cache_hits += 1
+            return self.cache[cache_key]
 
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
-        experiences = [self.buffer[idx] for idx in indices]
+        sx, sy = start
+        gx, gy = goal
+        open_set = []
+        heapq.heappush(open_set, (0, sx, sy))
+        came_from = {}
+        g_score = {start: 0}
 
-        total = len(self.buffer)
-        weights = (total * probs[indices]) ** (-beta)
-        weights /= weights.max()
-        weights = torch.tensor(weights, dtype=torch.float32, device=device)
+        max_iterations = 500  # Prevent infinite loops
+        iterations = 0
 
-        states_np = np.array(
-            [np.concatenate([e.state[0].flatten(), [e.state[1]]]) for e in experiences],
-            dtype=np.float32
-        )
-        next_states_np = np.array(
-            [np.concatenate([e.next_state[0].flatten(), [e.next_state[1]]]) for e in experiences],
-            dtype=np.float32
-        )
+        while open_set and iterations < max_iterations:
+            iterations += 1
+            _, x, y = heapq.heappop(open_set)
 
-        states = torch.tensor(states_np, dtype=torch.float32, device=device)
-        next_states = torch.tensor(next_states_np, dtype=torch.float32, device=device)
-        actions = torch.tensor([e.action for e in experiences], dtype=torch.long, device=device).unsqueeze(1)
-        rewards = torch.tensor([e.reward for e in experiences], dtype=torch.float32, device=device)
-        dones = torch.tensor([float(e.done) for e in experiences], dtype=torch.float32, device=device)
+            if (x, y) == (gx, gy):
+                self.cache[cache_key] = came_from
+                return came_from
 
-        return states, actions, rewards, next_states, dones, weights, indices
+            for nx, ny, move_cost in self.neighbors(x, y):
+                if (nx, ny) in obstacle_set:
+                    continue
+                if nx < 0 or ny < 0 or nx >= self.grid_w or ny >= self.grid_h:
+                    continue
 
-    def update_priorities(self, indices, prios):
-        for i, p in zip(indices, prios):
-            self.priorities[int(i)] = p
+                ng = g_score[(x, y)] + move_cost
+                if (nx, ny) not in g_score or ng < g_score[(nx, ny)]:
+                    g_score[(nx, ny)] = ng
+                    priority = ng + self.heuristic(nx, ny, gx, gy)
+                    heapq.heappush(open_set, (priority, nx, ny))
+                    came_from[(nx, ny)] = (x, y)
 
-    def __len__(self):
-        return len(self.buffer)
+        self.cache[cache_key] = {}
+        return {}
 
 
-# ---------------- Advanced Rainbow DQN Controller ------------------
+# ---------------- Advanced DQN Controller ------------------
 class AdvancedDQNController(Controller):
-    def __init__(
-        self,
-        goal,
-        cell_size,
-        env_padding,
-        is_training=True,
-        model_path="rainbow_dqn.pth",
-        use_noisy=False,
-        soft_tau=0.005,          # if >0 use soft update every step; otherwise use hard update freq
-        target_update_freq=1000
-    ):
+    def __init__(self, goal, cell_size, env_padding, is_training=True, model_path="dqn_model.pth"):
         super().__init__(goal, cell_size, env_padding, is_training, model_path)
-        self.use_noisy = use_noisy
-        self.soft_tau = soft_tau
-        self.target_update_freq = target_update_freq
         self._initialize_algorithm()
 
     def _initialize_algorithm(self):
-        print("Advanced Rainbow DQN initialized... (Noisy=%s, tau=%.5f)" % (self.use_noisy, self.soft_tau))
-        self.state_dim = 5*5 + 1
+        print("Initializing Improved AdvancedDQNController...")
+
+        # State & action
+        self.state_dim = 5 * 5 + 1
         self.action_dim = len(self.directions)
 
         # Networks
-        self.q_network = DuelingDQN(self.state_dim, self.action_dim, use_noisy=self.use_noisy).to(self.device)
-        self.target_network = DuelingDQN(self.state_dim, self.action_dim, use_noisy=self.use_noisy).to(self.device)
+        self.q_network = DuelingDQN(self.state_dim, self.action_dim).to(self.device)
+        self.target_network = DuelingDQN(self.state_dim, self.action_dim).to(self.device)
         self.target_network.load_state_dict(self.q_network.state_dict())
-        self.target_network.eval()
 
-        self.optimizer = optim.Adam(self.q_network.parameters(), lr=5e-4)
-        self.gamma = 0.99
-        self.batch_size = 64
-        self.buffer = PrioritizedReplayBuffer(30000)
+        # Optimizer with better hyperparams
+        self.optimizer = optim.AdamW(self.q_network.parameters(), lr=0.0001, weight_decay=0.0001)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=1000, T_mult=2)
+        self.loss_fn = nn.SmoothL1Loss()
+
+        # Replay buffer
+        self.memory = deque(maxlen=50000)
+        self.priorities = deque(maxlen=50000)
+        self.batch_size = 128
+        self.gamma = 0.995  # Slightly higher for longer horizon
         self.step_count = 0
-        self.gradient_clip = 1.0
+        self.target_update_freq = 500
+        self.tau = 0.001  # Softer update
 
-        # Multi-step
-        self.n_step = 3
-        self.n_step_buffer = deque(maxlen=self.n_step)
+        # Exploration - start lower for Noisy Networks
+        self.epsilon = 0.5 if self.is_training else 0.0
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.9995
+        self.hybrid_weight = 0.7  # Trust A* more initially
+        self.hybrid_decay = 0.9998  # Slowly reduce over time
 
-        # Exploration
-        self.epsilon = 1.0
-        self.epsilon_min = 0.05
-        self.epsilon_decay = 1e-5
+        # Anti-loop + curiosity
+        self.position_history = {}
+        self.visit_counts = {}
+        self.episode_positions = []
 
-        # PER / beta annealing
-        self.beta_start = 0.4
-        self.beta_frames = 1_000_000
-        self.frame_idx = 0
+        # Hybrid A*
+        self.hybrid = HybridAStar(grid_size=(32, 32))
 
+        # Performance tracking
+        self.recent_rewards = deque(maxlen=100)
+        self.steps_since_goal = 0
+
+        # Load model if not training
         if not self.is_training:
-            self._load_model_implementation()
+            self.load_model()
+
+    def reset_episode(self):
+        """Call this at the start of each episode"""
+        self.position_history.clear()
+        self.episode_positions = []
+        self.steps_since_goal = 0
+
+    def make_decision(self, robot, obstacles):
+        state, distance_to_goal = robot.get_state(obstacles, 32, 32, self.goal)
+        state_flat = state.flatten()
+        combined_state = np.concatenate([state_flat, [distance_to_goal]])
+        state_tensor = torch.FloatTensor(combined_state).unsqueeze(0).to(self.device)
+
+        if self.is_training:
+            self.q_network.train()
+            self.q_network.reset_noise()
+        else:
             self.q_network.eval()
 
-    # ---------------- Epsilon-greedy + Noisy handling ------------------
-    def make_decision(self, robot, obstacles):
-        s, dist = robot.get_state(obstacles, 32, 32, self.goal)
-        s = np.concatenate([s.flatten(), [dist]])
-        state = torch.tensor(s, dtype=torch.float32, device=self.device).unsqueeze(0)
+        # Track position
+        robot_grid = (int(robot.x // self.cell_size), int(robot.y // self.cell_size))
+        self.episode_positions.append(robot_grid)
 
-        # If using NoisyNet, we rely on parameter noise instead of epsilon-greedy.
-        if self.use_noisy and self.is_training:
-            # reset noise for exploration
-            self.q_network.reset_noise()
-            with torch.no_grad():
-                return self.directions[self.q_network(state).argmax().item()]
+        # Hybrid A* guidance with caching
+        obstacle_set = set((int(o.x // self.cell_size), int(o.y // self.cell_size)) for o in obstacles)
+        goal_grid = (int(self.goal[0] // self.cell_size), int(self.goal[1] // self.cell_size))
 
-        # Otherwise use epsilon-greedy
-        if self.is_training and random.random() < self.epsilon:
-            return self.directions[random.randint(0, self.action_dim-1)]
+        path_map = self.hybrid.find_path(robot_grid, goal_grid, obstacle_set)
+
+        hybrid_suggest = None
+        if path_map and goal_grid in path_map or any(goal_grid == k for k in path_map.keys()):
+            cur = goal_grid
+            # Reconstruct next step
+            path = [cur]
+            while cur in path_map and path_map[cur] != robot_grid:
+                cur = path_map[cur]
+                path.append(cur)
+                if len(path) > 100:  # Safety check
+                    break
+
+            if len(path) > 1:
+                next_step = path[-2]
+                dx = next_step[0] - robot_grid[0]
+                dy = next_step[1] - robot_grid[1]
+
+                for i, d in enumerate(self.directions):
+                    if d == (dx, dy):
+                        hybrid_suggest = i
+                        break
+
+        # Decision making
+        with torch.no_grad():
+            q_values = self.q_network(state_tensor)
+            dqn_choice = q_values.argmax().item()
+
+        # Epsilon-greedy with hybrid guidance
+        if random.random() < self.epsilon and self.is_training:
+            if hybrid_suggest is not None and random.random() < self.hybrid_weight:
+                action_idx = hybrid_suggest
+            else:
+                action_idx = random.randint(0, self.action_dim - 1)
         else:
-            with torch.no_grad():
-                return self.directions[self.q_network(state).argmax().item()]
+            if hybrid_suggest is not None and random.random() < self.hybrid_weight:
+                action_idx = hybrid_suggest
+            else:
+                action_idx = dqn_choice
 
-    # ---------------- Store experience (N-step) ------------------
-    def store_experience(self, state, action, reward, next_state, done):
-        """
-        state: tuple or structure as before (state_grid, distance)
-        """
-        self.n_step_buffer.append((state, action, reward, next_state, done))
-        if len(self.n_step_buffer) < self.n_step:
-            return
+        return self.directions[action_idx]
 
-        R, next_s, done_flag = 0, self.n_step_buffer[-1][3], self.n_step_buffer[-1][4]
-        for t, (_, _, r, _, d) in enumerate(self.n_step_buffer):
-            R += (self.gamma ** t) * r
-            if d:
-                next_s = _
-                done_flag = True
-                break
+    def store_experience(self, state, action_idx, reward, next_state, done):
+        state_matrix, state_distance = state
+        next_matrix, next_distance = next_state
+        state_flat = state_matrix.flatten()
+        next_flat = next_matrix.flatten()
+        state_combined = np.concatenate([state_flat, [state_distance]])
+        next_combined = np.concatenate([next_flat, [next_distance]])
 
-        s0, a0 = self.n_step_buffer[0][:2]
-        self.buffer.add(s0, a0, R, next_s, done_flag)
+        state_tensor = torch.FloatTensor(state_combined).to(self.device)
+        next_tensor = torch.FloatTensor(next_combined).to(self.device)
+        action_tensor = torch.LongTensor([action_idx]).to(self.device)
+        reward_tensor = torch.FloatTensor([reward]).to(self.device)
+        done_tensor = torch.FloatTensor([done]).to(self.device)
 
-    # ---------------- Train ------------------
+        self.memory.append((state_tensor, action_tensor, reward_tensor, next_tensor, done_tensor))
+
+        # Initialize priority
+        max_priority = max([float(p) for p in self.priorities], default=1.0)
+        self.priorities.append(float(max_priority))
+
+        self.recent_rewards.append(reward)
+
     def train(self):
-        if len(self.buffer) < self.batch_size:
+        if len(self.memory) < self.batch_size:
             return
 
-        # Beta annealing for PER
-        beta = min(1.0, self.beta_start + (1.0 - self.beta_start) * (self.frame_idx / max(1, self.beta_frames)))
-        self.frame_idx += 1
+        # Prioritized sampling
+        clean_priorities = np.array([float(p) for p in self.priorities], dtype=np.float32)
+        clean_priorities = np.clip(clean_priorities, 1e-6, None)
+        probs = clean_priorities ** 0.6
+        probs = probs / probs.sum()
 
-        states, actions, rewards, next_states, dones, weights, indices = \
-            self.buffer.sample(self.batch_size, beta, self.device)
+        indices = np.random.choice(len(self.memory), self.batch_size, p=probs, replace=False)
+        batch = [self.memory[i] for i in indices]
 
-        # Reset noise in noisy layers if used
-        if self.use_noisy:
-            self.q_network.reset_noise()
-            self.target_network.reset_noise()
+        states, actions, rewards, next_states, dones = zip(*batch)
+        states = torch.stack(states)
+        actions = torch.stack(actions)
+        rewards = torch.stack(rewards).squeeze()
+        next_states = torch.stack(next_states)
+        dones = torch.stack(dones).squeeze()
 
-        # Current Q
-        current_q = self.q_network(states).gather(1, actions).squeeze()
+        # Double DQN
+        q_values = self.q_network(states).gather(1, actions)
 
         with torch.no_grad():
-            # Double DQN target
-            best_actions = self.q_network(next_states).argmax(1, keepdim=True)
-            next_q = self.target_network(next_states).gather(1, best_actions).squeeze()
-            target_q = rewards + (1 - dones) * (self.gamma ** self.n_step) * next_q
+            next_actions = self.q_network(next_states).argmax(dim=1, keepdim=True)
+            next_q_values = self.target_network(next_states).gather(1, next_actions)
+            target_q = rewards + (1 - dones) * self.gamma * next_q_values.squeeze()
 
-        td_errors = target_q - current_q
-        loss = (td_errors.pow(2) * weights).mean()
+        loss = self.loss_fn(q_values, target_q.unsqueeze(1))
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), self.gradient_clip)
+        nn.utils.clip_grad_norm_(self.q_network.parameters(), 10.0)
         self.optimizer.step()
+        self.scheduler.step()
 
-        # Update PER priorities (use abs td + small eps)
-        new_priorities = td_errors.abs().detach().cpu().numpy() + 1e-6
-        self.buffer.update_priorities(indices, new_priorities)
+        # Update priorities
+        td_errors = (q_values - target_q.unsqueeze(1)).detach().cpu().numpy()
+        for i, idx in enumerate(indices):
+            err = float(np.abs(td_errors[i]).item())
+            self.priorities[idx] = err + 1e-4
 
-        # Epsilon decay (only if not using noisy)
-        if not self.use_noisy:
-            self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_decay)
-
-        # Target update: soft or hard
-        self.step_count += 1
-        if self.soft_tau and self.soft_tau > 0:
-            # soft update every step
+        # Soft update target
+        if self.step_count % self.target_update_freq == 0:
             for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
-                target_param.data.copy_(self.soft_tau * param.data + (1.0 - self.soft_tau) * target_param.data)
-        else:
-            if self.step_count % self.target_update_freq == 0:
-                self.target_network.load_state_dict(self.q_network.state_dict())
+                target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
 
-    # ---------------- Reward function (improved) ------------------
-    def calculate_reward(
-            self,
-            robot,
-            obstacles,
-            done,
-            reached_goal,
-            distance_to_goal,
-            *,
-            prev_distance=None
-    ):
-        pos = (robot.grid_x, robot.grid_y)
+        self.step_count += 1
 
-        # Track visit counts
-        visits = getattr(self, 'visit_counts', {})
-        visits[pos] = visits.get(pos, 0) + 1
-        self.visit_counts = visits
+    def update_epsilon(self):
+        """Call this after each episode"""
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+            self.epsilon = max(self.epsilon_min, self.epsilon)
 
-        # Repeat penalty
-        repeat_penalty = -0.05 * (visits[pos] - 1)
+        if self.hybrid_weight > 0.3:
+            self.hybrid_weight *= self.hybrid_decay
+            self.hybrid_weight = max(0.3, self.hybrid_weight)
 
-        # Collision penalty
-        collision_penalty = -0.4 if robot.check_collision(obstacles) else 0
+    def calculate_reward(self, robot, obstacles, done, reached_goal, distance_to_goal, prev_distance=None):
+        robot_grid = (int(robot.x // self.cell_size), int(robot.y // self.cell_size))
 
-        # Goal reward
-        goal_reward = 1.0 if reached_goal else 0.0
+        # Loop detection
+        repeat = self.position_history.get(robot_grid, 0)
+        self.position_history[robot_grid] = repeat + 1
+        loop_penalty = -5 * min(repeat, 5) if repeat > 2 else 0
+
+        # Curiosity bonus
+        visit = self.visit_counts.get(robot_grid, 0)
+        self.visit_counts[robot_grid] = visit + 1
+        curiosity = 0.5 / (1 + visit * 0.3)
+
+        # Goal reached
+        if reached_goal:
+            time_bonus = max(0, 100 - self.steps_since_goal * 0.5)
+            return 200 + time_bonus + curiosity
+
+        # Collision
+        if robot.check_collision(obstacles):
+            return -150
 
         # Progress reward
-        if prev_distance is None:
-            progress = 0.0
-        else:
-            delta = prev_distance - distance_to_goal
-            progress = delta * 6.0
+        if prev_distance is not None:
+            progress = prev_distance - distance_to_goal
+            move_reward = progress * 20 if progress > 0 else progress * 10
 
-            if delta < 0:
-                # punish moving away
-                progress -= 2.0
+            # Distance-based shaping
+            distance_reward = -distance_to_goal * 0.01
 
-        # Exploration bonus
-        explore_bonus = 0.05 if visits[pos] == 1 else 0.0
+            # Time penalty
+            step_penalty = -0.1
 
-        reward = progress + repeat_penalty + collision_penalty + goal_reward + explore_bonus
-        return float(np.clip(reward, -1.0, 1.0))
+            self.steps_since_goal += 1
 
-    # ---------------- Save / Load ------------------
+            return move_reward + distance_reward + step_penalty + loop_penalty + curiosity
+
+        return -0.1 + curiosity + loop_penalty
+
     def _save_model_implementation(self):
-        torch.save({
+        checkpoint = {
             'q_network': self.q_network.state_dict(),
+            'target_network': self.target_network.state_dict(),
             'optimizer': self.optimizer.state_dict(),
-        }, self.model_path)
+            'scheduler': self.scheduler.state_dict(),
+            'epsilon': self.epsilon,
+            'hybrid_weight': self.hybrid_weight,
+            'step_count': self.step_count
+        }
+        torch.save(checkpoint, self.model_path)
+        print(f"Model saved to {self.model_path}")
 
     def _load_model_implementation(self):
-        ckpt = torch.load(self.model_path, map_location=self.device)
+        checkpoint = torch.load(self.model_path)
+        self.q_network.load_state_dict(checkpoint['q_network'])
+        self.target_network.load_state_dict(checkpoint['target_network'])
 
-        # case: checkpoint mới
-        if 'q_network' in ckpt:
-            print("Loading full checkpoint...")
-            self.q_network.load_state_dict(ckpt['q_network'])
-            self.target_network.load_state_dict(ckpt['target_network'])
-            self.optimizer.load_state_dict(ckpt['optimizer'])
-            return
+        if 'optimizer' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'scheduler' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler'])
+        if 'epsilon' in checkpoint:
+            self.epsilon = checkpoint['epsilon']
+        if 'hybrid_weight' in checkpoint:
+            self.hybrid_weight = checkpoint['hybrid_weight']
+        if 'step_count' in checkpoint:
+            self.step_count = checkpoint['step_count']
 
-        # case: checkpoint cũ chỉ có state_dict
-        print("Loading legacy checkpoint (state_dict only)...")
-        self.q_network.load_state_dict(ckpt)
-        self.target_network.load_state_dict(ckpt)
+        self.q_network.eval()
+        print(f"Model loaded from {self.model_path}")
