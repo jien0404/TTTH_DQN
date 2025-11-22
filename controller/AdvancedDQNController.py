@@ -642,7 +642,8 @@ class AdvancedDQNController(Controller):
     def load_model(self):
         """Load complete checkpoint"""
         if os.path.exists(self.model_path):
-            checkpoint = torch.load(self.model_path, map_location=self.device)
+            # PyTorch 2.6+ requires weights_only=False for custom objects
+            checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
             self.q_network.load_state_dict(checkpoint['q_network'])
             self.target_network.load_state_dict(checkpoint['target_network'])
 
