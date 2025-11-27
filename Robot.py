@@ -3,7 +3,7 @@ import numpy as np
 from Colors import *
 
 class Robot:
-    def __init__(self, x, y, cell_size, controller, vision, radius=8, env_padding=30):
+    def __init__(self, x, y, cell_size, controller, vision, radius=5, env_padding=30):
         self.cell_size = cell_size
         self.env_padding = env_padding
         self.grid_x = int((x - env_padding) // cell_size)
@@ -12,8 +12,10 @@ class Robot:
         self.y = self.env_padding + (self.grid_y + 0.5) * self.cell_size
         self.controller = controller
         self.vision = vision
+        self.speed = 1.0
         self.radius = radius
         self.direction = (0, 0)
+        self.last_move_vector = np.array([0, 0])
 
     def move(self, obstacles, grid_width, grid_height):
         self.direction = self.controller.make_decision(self, obstacles)
@@ -48,7 +50,13 @@ class Robot:
             # self.x, self.y = old_x, old_y
             return True  # Báo hiệu va chạm
 
+        self.last_move_vector = np.array([self.x - old_x, self.y - old_y])
+
         return False  # Không có va chạm
+    
+    def get_last_move(self):
+        """Trả về vector di chuyển của bước gần nhất."""
+        return self.last_move_vector
 
     def is_diagonal_move(self, dx, dy):
         """Kiểm tra xem di chuyển có phải là diagonal không"""
@@ -111,44 +119,45 @@ class Robot:
                 return True
         return False
 
-    def get_state(self, obstacles, grid_width, grid_height, goal):
-        # Tạo ma trận trạng thái 5x5, khởi tạo tất cả là 0 (ô trống)
-        state = np.zeros((5, 5), dtype=int)
+    def get_state(self, obstacles, grid_width, grid_height, goal, vision_size=5):
+        # Tính toán phạm vi dựa trên vision_size
+        vision_range = vision_size // 2
+        state = np.zeros((vision_size, vision_size)) # <-- SỬA Ở ĐÂY
 
-        # Duyệt các ô trong phạm vi 5x5 xung quanh robot
-        for i in range(-2, 3):
-            for j in range(-2, 3):
-                grid_x = self.grid_x + i
-                grid_y = self.grid_y + j
-                state_idx_x = i + 2
-                state_idx_y = j + 2
+        # Lặp dựa trên phạm vi đã tính
+        for i in range(-vision_range, vision_range + 1):
+            for j in range(-vision_range, vision_range + 1):
+                grid_x = self.grid_x + j
+                grid_y = self.grid_y + i
+
+                # Cập nhật index cho mảng state
+                state_y = i + vision_range
+                state_x = j + vision_range
+
+                # Kiểm tra biên
                 if not (0 <= grid_x < grid_width and 0 <= grid_y < grid_height):
-                    state[state_idx_x, state_idx_y] = 1
+                    state[state_y, state_x] = -1  # Tường
                     continue
 
-        # Duyệt các chướng ngại vật và gán giá trị 1 cho các ô mà chúng chiếm
-        for obs in obstacles:
-            x1, x2, y1, y2 = obs.get_bounding_box()
-            grid_x1 = int((x1 - self.env_padding) // self.cell_size)
-            grid_x2 = int((x2 - self.env_padding) // self.cell_size)
-            grid_y1 = int((y1 - self.env_padding) // self.cell_size)
-            grid_y2 = int((y2 - self.env_padding) // self.cell_size)
-            for gx in range(max(0, grid_x1), min(grid_width, grid_x2 + 1)):
-                for gy in range(max(0, grid_y1), min(grid_height, grid_y2 + 1)):
-                    state_idx_x = gx - self.grid_x + 2
-                    state_idx_y = gy - self.grid_y + 2
-                    if 0 <= state_idx_x < 5 and 0 <= state_idx_y < 5:
-                        state[state_idx_x, state_idx_y] = 1
+                # Kiểm tra va chạm vật cản
+                collided = False
+                for obs in obstacles:
+                    obstacle_rect = pygame.Rect(obs.x, obs.y, obs.width, obs.height)
+                    robot_check_pos = (
+                        self.env_padding + (grid_x + 0.5) * self.cell_size,
+                        self.env_padding + (grid_y + 0.5) * self.cell_size
+                    )
+                    if obstacle_rect.collidepoint(robot_check_pos):
+                        state[state_y, state_x] = -1 # Vật cản
+                        collided = True
+                        break
+                
+                if not collided:
+                    state[state_y, state_x] = 0 # Ô trống
 
-        # Gán giá trị 2 cho vị trí robot (trung tâm ma trận)
-        state[2, 2] = 2
-
-        # Tính chỉ số ô lưới của đích
-        goal_grid_x = int((goal[0] - self.env_padding) // self.cell_size)
-        goal_grid_y = int((goal[1] - self.env_padding) // self.cell_size)
-
-        # Tính khoảng cách Euclidean đến đích (tính bằng số ô)
-        distance_to_goal = ((self.grid_x - goal_grid_x)**2 + (self.grid_y - goal_grid_y)**2)**0.5
+        # Tính khoảng cách đến đích
+        distance_to_goal = np.sqrt((self.grid_x - (goal[0] - self.env_padding) / self.cell_size)**2 +
+                                (self.grid_y - (goal[1] - self.env_padding) / self.cell_size)**2)
 
         return state, distance_to_goal
     
