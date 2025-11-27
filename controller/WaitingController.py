@@ -216,25 +216,29 @@ class WaitingController(Controller):
                 found_new = True
         return found_new
 
-    def _is_current_path_unsafe(self):
+    def _is_current_path_unsafe(self, robot_pos):
         if not self.current_path: return True
         
-        # Kiểm tra đoạn đường sắp tới
+        # 1. KIỂM TRA QUAN TRỌNG NHẤT: Đoạn từ Robot đến điểm mốc tiếp theo
+        # Nếu ngay trước mặt bị chặn thì phải tìm đường mới ngay
+        target_pt = self.current_path[self.target_waypoint_index]
+        
+        # Dùng planner ảo để check va chạm
+        dummy_planner = AStarPlanner((0,0), (0,0), self.known_static_obstacles, 0, 0, 7)
+        
+        if not dummy_planner._is_line_safe(robot_pos, target_pt):
+             print("🚫 Immediate path blocked! (Robot -> Target)")
+             return True
+
+        # 2. Kiểm tra các đoạn đường tiếp theo trong tương lai
         start = self.target_waypoint_index
         end = min(len(self.current_path), start + 10)
         
-        # Tạo planner ảo để dùng hàm check va chạm
-        # Lưu ý: radius=7 để check rộng hơn thực tế một chút cho an toàn
-        dummy_planner = AStarPlanner((0,0), (0,0), self.known_static_obstacles, 0, 0, 7)
-        
-        # SỬA ĐỔI: Kiểm tra từng ĐOẠN THẲNG (Line Segment) thay vì chỉ kiểm tra điểm
         for i in range(start, end - 1):
             p1 = self.current_path[i]
             p2 = self.current_path[i+1]
-            
-            # Hàm _is_line_safe sẽ rải các điểm nhỏ trên đoạn p1-p2 để check
             if not dummy_planner._is_line_safe(p1, p2):
-                print(f"🚫 Path segment {i} blocked by known obstacle!")
+                print(f"🚫 Future path segment {i} blocked!")
                 return True 
                 
         return False
@@ -246,9 +250,14 @@ class WaitingController(Controller):
 
         # 1. Vision
         found_new_obstacle = self._update_vision(robot, obstacles)
-        if found_new_obstacle:
-            if self._is_current_path_unsafe():
-                self.current_path = None 
+        if self.current_path:
+            # Truyền robot_pos vào để check đoạn ngay trước mặt
+            if found_new_obstacle or self.stuck_counter > 2 or self._is_current_path_unsafe(robot_pos):
+                if found_new_obstacle: print("👀 New obstacle found.")
+                elif self.stuck_counter > 2: print("⚠️ Robot moving slowly/stuck.")
+                else: print("⚠️ Path became unsafe.")
+                
+                self.current_path = None # Hủy đường cũ
 
         # 2. Stuck Handling
         if self.reversing_steps > 0:
@@ -262,8 +271,22 @@ class WaitingController(Controller):
         self.last_position = robot_pos
 
         if self.stuck_counter > 10:
-            print("🚨 Stuck! Reversing.")
-            self.reversing_steps = 10
+            print("🚨 Stuck! Adding virtual obstacle and Reversing.")
+            
+            # THÊM MỚI: Tạo vật cản ảo tại vị trí đang kẹt (hoặc phía trước mặt)
+            # Để lần sau A* biết đường mà né chỗ này ra
+            virtual_obs = pygame.Rect(robot.x - 10, robot.y - 10, 20, 20)
+            # Lưu ý: Bạn cần tạo một class Obstacle giả hoặc struct tương tự để A* hiểu
+            # Ở đây tôi dùng object đơn giản có thuộc tính x, y, width, height, static
+            class VirtualObs:
+                def __init__(self, x, y):
+                    self.x, self.y = x, y
+                    self.width, self.height = 20, 20
+                    self.static = True
+            
+            self.known_static_obstacles.append(VirtualObs(robot.x, robot.y))
+            
+            self.reversing_steps = 15 # Lùi xa hơn chút
             self.current_path = None
             self.stuck_counter = 0
             return self._find_escape_direction(robot, obstacles) or (0,0)
