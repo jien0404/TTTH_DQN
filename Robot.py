@@ -3,7 +3,7 @@ import numpy as np
 from Colors import *
 
 class Robot:
-    def __init__(self, x, y, cell_size, controller, vision, radius=8, env_padding=30):
+    def __init__(self, x, y, cell_size, controller, vision, radius=5, env_padding=30):
         self.cell_size = cell_size
         self.env_padding = env_padding
         self.grid_x = int((x - env_padding) // cell_size)
@@ -12,6 +12,7 @@ class Robot:
         self.y = self.env_padding + (self.grid_y + 0.5) * self.cell_size
         self.controller = controller
         self.vision = vision
+        self.speed = 1.0
         self.radius = radius
         self.direction = (0, 0)
         self.last_move_vector = np.array([0, 0])
