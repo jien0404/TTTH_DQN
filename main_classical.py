@@ -57,7 +57,7 @@ class TestEnvironment:
         self.trap_count = 0
         
         self.clock = pygame.time.Clock()
-        self.FPS = 10
+        self.FPS = 30
 
     def setup_environment(self):
         start_gx, start_gy = self.map_data["Start"]

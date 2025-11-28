@@ -147,29 +147,29 @@ class WaitingRule:
 
     def get_time_to_collision(self, robot, direction, dynamic_obstacles):
         robot_pos = np.array([robot.x, robot.y])
+        # Lấy tốc độ thực tế robot sẽ đi (đã chuẩn hóa là 1 cell/step)
+        vel = np.array(direction) * robot.cell_size 
         
-        # SỬA 1: Robot đi rất nhanh (1 cell/step), đừng nhân 0.8 nữa
-        # Nhân 1.1 để đảm bảo robot thoát hẳn khỏi vùng va chạm trong tính toán
-        vel = np.array(direction) * robot.cell_size * 1.0 
-        
-        # Bán kính va chạm thực tế (Robot + Vật cản trung bình + đệm nhỏ)
-        # Robot radius ~6, Obstacle width ~16 (radius ~8). 6+8+2 = 16px
-        collision_threshold = robot.radius + 10 
+        # Bán kính va chạm an toàn (Robot + Obstacle + Margin)
+        # Tăng margin lên một chút để robot sợ vật cản hơn
+        collision_threshold = robot.radius + 12 
 
         for obs in dynamic_obstacles:
             obs_pos = np.array([obs.x, obs.y])
             obs_vel = np.array(obs.velocity)
 
+            # KIỂM TRA NGAY BƯỚC ĐẦU TIÊN (Immediate Check)
+            # Nếu bước đi tiếp theo gây va chạm ngay lập tức -> TTC = 0
+            next_rob = robot_pos + vel
+            next_obs = obs_pos + obs_vel
+            if np.linalg.norm(next_rob - next_obs) < collision_threshold:
+                return 0.5 # Rất nguy hiểm
+
             for t in range(1, self.prediction_horizon + 1):
                 f_rob = robot_pos + vel * t
-                f_obs = obs_pos + obs_vel * t # Vật cản đi chậm
-
-                # SỬA 2: Chỉ check khoảng cách tương lai. 
-                # Bỏ qua check vector (np.dot) vì robot nhanh hơn vật cản rất nhiều,
-                # việc check hướng về vị trí cũ (robot_pos) là vô nghĩa.
-                dist = np.linalg.norm(f_rob - f_obs)
+                f_obs = obs_pos + obs_vel * t
                 
-                if dist < collision_threshold:
+                if np.linalg.norm(f_rob - f_obs) < collision_threshold:
                     return t
                     
         return None
@@ -242,6 +242,80 @@ class WaitingController(Controller):
                 return True 
                 
         return False
+    
+    def _apply_dynamic_steering(self, robot, intended_dir, dynamic_obstacles):
+        """
+        Điều chỉnh hướng đi dựa trên vận tốc của vật cản động (Local Steering).
+        Nguyên tắc: Né về phía ngược lại với hướng di chuyển của vật cản.
+        """
+        robot_pos = np.array([robot.x, robot.y])
+        best_dir = np.array(intended_dir)
+        
+        # Tìm vật cản nguy hiểm nhất
+        most_dangerous_obs = None
+        min_ttc = float('inf')
+        
+        # Chỉ xét vật cản trong tầm nhìn và đang có nguy cơ va chạm
+        for obs in dynamic_obstacles:
+            dist = np.linalg.norm(np.array([obs.x, obs.y]) - robot_pos)
+            if dist > robot.vision * 1.2: continue # Quá xa thì kệ
+            
+            # Dự đoán va chạm
+            ttc = self.waiting_rule.get_time_to_collision(robot, tuple(best_dir), [obs])
+            
+            # Nếu có nguy cơ va chạm gần (dưới 15 bước - khoảng 1.5s)
+            if ttc is not None and ttc < 15:
+                if ttc < min_ttc:
+                    min_ttc = ttc
+                    most_dangerous_obs = obs
+        
+        # Nếu không có mối đe dọa nào quá gần, giữ nguyên hướng
+        if most_dangerous_obs is None:
+            return intended_dir
+
+        print(f"⚠️ Steering to avoid dynamic obstacle (TTC: {min_ttc})")
+        
+        # --- TÍNH TOÁN HƯỚNG LÁCH ---
+        obs_vel = np.array(most_dangerous_obs.velocity)
+        
+        # 1. Tính vector pháp tuyến của hướng đi robot (Trái và Phải)
+        # Hướng đi: (dx, dy) -> Vuông góc phải: (-dy, dx), Vuông góc trái: (dy, -dx)
+        right_normal = np.array([-best_dir[1], best_dir[0]])
+        left_normal = np.array([best_dir[1], -best_dir[0]])
+        
+        # 2. Xem vật cản đang trôi về bên nào so với đường đi của robot
+        # Dùng tích vô hướng (Dot Product) để chiếu vận tốc vật cản lên pháp tuyến phải
+        # Nếu > 0: Vật cản đang đi sang phải -> Robot nên né sang Trái
+        drift_score = np.dot(obs_vel, right_normal)
+        
+        avoidance_force = np.array([0.0, 0.0])
+        strength = 1.5 # Cường độ lách (càng lớn lách càng gắt)
+        
+        # Logic người dùng yêu cầu:
+        if drift_score > 0.1: 
+            # Vật cản đi sang phải -> Robot lách sang Trái (đi vòng ra sau lưng hoặc tạt đầu xa)
+            avoidance_force = left_normal * strength
+        elif drift_score < -0.1:
+            # Vật cản đi sang trái -> Robot lách sang Phải
+            avoidance_force = right_normal * strength
+        else:
+            # Vật cản đi trực diện hoặc đứng yên trên đường
+            # Lách sang bên nào thoáng hơn (dựa vào vị trí vật cản)
+            vec_to_obs = np.array([most_dangerous_obs.x, most_dangerous_obs.y]) - robot_pos
+            if np.dot(vec_to_obs, right_normal) > 0:
+                avoidance_force = left_normal * strength # Vật cản ở bên phải thì lách trái
+            else:
+                avoidance_force = right_normal * strength # Vật cản ở bên trái thì lách phải
+                
+        # 3. Cộng lực lách vào hướng đi chính
+        new_dir = best_dir + avoidance_force
+        
+        # Chuẩn hóa lại vector
+        norm = np.linalg.norm(new_dir)
+        if norm > 0:
+            new_dir = new_dir / norm
+            
+        return tuple(new_dir)
 
     def make_decision(self, robot, obstacles):
         self.replanning_cooldown = max(0, self.replanning_cooldown - 1)
@@ -336,12 +410,26 @@ class WaitingController(Controller):
                     valid_dirs.append((d, diff))
             
             if valid_dirs:
-                best_dir = min(valid_dirs, key=lambda x: x[1])[0]
-                ttc = self.waiting_rule.get_time_to_collision(robot, best_dir, dynamic_obstacles)
-                if ttc and ttc <= 2: 
-                     print(f"⚠️ Collision predicted in {ttc} steps. Waiting.")
-                     return (0,0)
-                return best_dir
+                best_dir_static = min(valid_dirs, key=lambda x: x[1])[0]
+                
+                # --- SỬA ĐỔI: ÁP DỤNG STEERING BEHAVIOR ---
+                
+                # 1. Tính hướng né vật cản động
+                steered_dir = self._apply_dynamic_steering(robot, best_dir_static, dynamic_obstacles)
+                
+                # 2. Kiểm tra xem hướng đã né này có an toàn với TƯỜNG (vật cản tĩnh) không?
+                # Robot lách vật cản động nhưng không được đâm vào tường
+                if self._is_move_safe(robot, steered_dir, self.known_static_obstacles):
+                    # Nếu an toàn, đi theo hướng đã lách
+                    # Kiểm tra lại lần cuối xem hướng lách này có va chạm ngay lập tức với dynamic obs không (trường hợp quá gần)
+                    ttc = self.waiting_rule.get_time_to_collision(robot, steered_dir, dynamic_obstacles)
+                    if ttc is None or ttc > 2: # > 2 bước là đủ an toàn để lướt qua
+                         return steered_dir
+                
+                # 3. Nếu hướng lách bị chặn bởi tường, hoặc vẫn sẽ đâm vào vật cản động
+                # Thì đành phải phanh lại (Wait) hoặc dùng A* detour (như code trước)
+                print("⚠️ Steering blocked or unsafe. Waiting/Braking.")
+                return (0,0)
         
         return (0,0)
 
