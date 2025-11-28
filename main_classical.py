@@ -7,6 +7,8 @@ import time
 from Robot import Robot
 from Obstacle import Obstacle
 from controller.WaitingController import WaitingController # Import controller mới
+from controller.IndoorAdaptedController import IndoorAdaptedController
+
 from Colors import *
 from MapData import maps
 
@@ -71,6 +73,10 @@ class TestEnvironment:
         # Khởi tạo controller được chỉ định
         if self.controller_name == "WaitingController":
             self.controller = WaitingController(self.goal, cell_size, env_padding, GRID_WIDTH, GRID_HEIGHT)
+        elif self.controller_name == "IndoorAdaptedController":
+            self.controller = IndoorAdaptedController(
+                self.goal, cell_size, env_padding, GRID_WIDTH, GRID_HEIGHT
+            )
         else:
             raise ValueError(f"Controller {self.controller_name} not supported in this script.")
             
@@ -174,7 +180,7 @@ class TestEnvironment:
 
 def main():
     selected_map = select_map()
-    controller_name = "WaitingController" # Chỉ chạy controller này
+    controller_name = "IndoorAdaptedController" # Chỉ chạy controller này
     
     num_episodes = int(input("Enter number of test episodes (default 10): ") or "10")
 
