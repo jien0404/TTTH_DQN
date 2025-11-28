@@ -59,7 +59,7 @@ class TestEnvironment:
         self.trap_count = 0
         
         self.clock = pygame.time.Clock()
-        self.FPS = 10
+        self.FPS = 60
 
     def setup_environment(self):
         start_gx, start_gy = self.map_data["Start"]
@@ -139,7 +139,7 @@ class TestEnvironment:
                 current_steps += 1
 
                 # Kiểm tra điều kiện kết thúc
-                reached_goal = np.linalg.norm(np.array((self.robot.x, self.robot.y)) - np.array(self.goal)) < self.robot.radius + 5
+                reached_goal = np.linalg.norm(np.array((self.robot.x, self.robot.y)) - np.array(self.goal)) < self.robot.radius + 20
                 
                 trapped = False
                 if len(state_history) > 100 and len(set(state_history[-20:])) <= 3:

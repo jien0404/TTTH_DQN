@@ -7,7 +7,7 @@ from controller.Controller import Controller
 
 
 # ==============================================================================
-# RRT PLANNER - TỐI ƯU HÓA
+# RRT PLANNER - TỐI ƯU HÓA (GIỮ NGUYÊN)
 # ==============================================================================
 
 class RRTNode:
@@ -37,7 +37,7 @@ class OptimizedRRTPlanner:
         self.robot_radius = robot_radius
         self.expand_dist = expand_dist
         self.max_iter = max_iter
-        self.goal_sample_rate = goal_sample_rate  # % sample goal
+        self.goal_sample_rate = goal_sample_rate
         self.node_list = [self.start]
 
     def plan(self):
@@ -226,12 +226,12 @@ class OptimizedRRTPlanner:
 
 
 # ==============================================================================
-# CONTROLLER - CHỈ DÙNG RRT
+# CONTROLLER - CHỈ DÙNG RRT (ĐÃ SỬA ĐỔI)
 # ==============================================================================
 
 class IndoorAdaptedController(Controller):
     """
-    Controller đơn giản: Chỉ dùng RRT để planning và follow path
+    Controller đơn giản: Chỉ dùng RRT để planning và follow path (đã tối ưu)
     """
 
     def __init__(self, goal, cell_size, env_padding, grid_width, grid_height,
@@ -242,7 +242,7 @@ class IndoorAdaptedController(Controller):
         self._initialize_algorithm()
 
     def _initialize_algorithm(self):
-        print("Initializing RRT-Only Controller...")
+        print("Initializing RRT-Only Controller (Optimized Stable)...")
 
         # Path planning
         self.current_path = None
@@ -273,7 +273,7 @@ class IndoorAdaptedController(Controller):
         self._update_stuck_detection(robot_pos)
 
         # ------------------------------------------------------------------
-        # 1. CẢI THIỆN STUCK DETECTION + BUỘC REPLAN SỚM HƠN
+        # 1. KIỂM TRA ĐIỀU KIỆN REPLAN (Ổn định hóa ngưỡng Stuck = 8)
         # ------------------------------------------------------------------
         needs_replan = False
         replan_reason = ""
@@ -283,9 +283,8 @@ class IndoorAdaptedController(Controller):
             replan_reason = "No path"
 
         elif self.target_waypoint_index >= len(self.current_path) - 1:
-            # Đã gần goal hoặc hết path
-            if np.hypot(robot_pos[0] - self.goal[0], robot_pos[1] - self.goal[1]) < self.cell_size * 2:
-                return (0, 0)  # Đã đến đích
+            if np.hypot(robot_pos[0] - self.goal[0], robot_pos[1] - self.goal[1]) < self.waypoint_threshold:
+                return (0, 0)
             needs_replan = True
             replan_reason = "Path completed"
 
@@ -293,83 +292,90 @@ class IndoorAdaptedController(Controller):
             needs_replan = True
             replan_reason = "Path blocked"
 
-        # STUCK QUÁ 8 bước → replan ngay lập tức (rất quan trọng!)
+        # STUCK QUÁ 8 bước → replan ngay lập tức
         elif self.stuck_counter > 8:
             needs_replan = True
             replan_reason = f"Stuck detected ({self.stuck_counter})"
-            self.stuck_counter = 0  # reset để lần sau lại nhạy
-
-        # Không di chuyển được 2 giây liên tục → force replan
-        elif self.last_position is not None:
-            if np.linalg.norm(np.array(robot_pos) - np.array(self.last_position)) < 1.0:
-                self.stuck_counter += 2  # tăng nhanh hơn
+            self.stuck_counter = 0  # reset
 
         # ------------------------------------------------------------------
-        # 2. REPLAN (với goal bias cao hơn + expand_dist nhỏ hơn khi bị kẹt)
+        # 2. REPLAN (Sử dụng tham số trung bình, Cooldown tăng lên 20)
         # ------------------------------------------------------------------
         if needs_replan and self.replanning_cooldown == 0:
             print(f"Replanning... ({replan_reason})")
 
-            # Khi bị stuck → giảm expand_dist và tăng goal bias để path "thoát" nhanh hơn
-            expand_dist = self.cell_size * 0.8 if "Stuck" in replan_reason else self.cell_size
-            goal_bias = 40 if "Stuck" in replan_reason else 25  # 40% sample goal khi kẹt
+            # Tham số trung bình khi Stuck để tránh phản ứng thái quá
+            expand_dist = self.cell_size * 0.7 if "Stuck" in replan_reason else self.cell_size * 0.9
+            goal_bias = 30 if "Stuck" in replan_reason else 25
 
-            planner = OptimizedRRTPlanner(
-                start=robot_pos,
-                goal=self.goal,
-                obstacles=self.known_static_obstacles,
-                grid_width=self.env_padding * 2 + self.grid_width * self.cell_size,
-                grid_height=self.env_padding * 2 + self.grid_height * self.cell_size,
-                robot_radius=robot.radius,
-                expand_dist=expand_dist,
-                max_iter=6000,
-                goal_sample_rate=goal_bias
-            )
+            def run_rrt(start, goal, obstacles, expand_dist, goal_bias):
+                planner = OptimizedRRTPlanner(
+                    start=start, goal=goal, obstacles=obstacles,
+                    grid_width=self.env_padding * 2 + self.grid_width * self.cell_size,
+                    grid_height=self.env_padding * 2 + self.grid_height * self.cell_size,
+                    robot_radius=robot.radius, expand_dist=expand_dist,
+                    max_iter=6000, goal_sample_rate=goal_bias
+                )
+                return planner.plan()
 
-            new_path = planner.plan()
+            # Lần thử 1: Với bộ nhớ vật cản hiện tại
+            new_path = run_rrt(robot_pos, self.goal, self.known_static_obstacles, expand_dist, goal_bias)
 
-            if new_path and len(new_path) > 3:  # path có ít nhất vài waypoint
+            if new_path and len(new_path) > 3:
                 self.current_path = new_path
                 self.target_waypoint_index = 0
                 print(f"New path: {len(new_path)} waypoints")
             else:
-                print("RRT failed → mở rộng bộ nhớ obstacle và thử lại")
-                # Thêm "temporary obstacle" tại vị trí hiện tại để ép RRT tránh ngõ cụt
+                # Lần thử 2: Thêm chướng ngại vật tạm thời tại vị trí kẹt
+                print("RRT failed → thêm temporary obstacle và thử lại")
                 from pygame import Rect
                 temp_obs = type('obj', (object,), {
                     'x': robot.x, 'y': robot.y,
                     'width': self.cell_size * 3, 'height': self.cell_size * 3,
                     'static': True
                 })()
-                self.known_static_obstacles.append(temp_obs)
+                temp_obstacles = self.known_static_obstacles + [temp_obs]
 
-            self.replanning_cooldown = 15  # giảm cooldown
+                new_path = run_rrt(robot_pos, self.goal, temp_obstacles, expand_dist, goal_bias)
+
+                if new_path and len(new_path) > 3:
+                    self.current_path = new_path
+                    self.target_waypoint_index = 0
+                    print(f"New path (Temp Obs): {len(new_path)} waypoints")
+                else:
+                    print("RRT failed 2 lần → đứng im.")
+                    self.replanning_cooldown = 20
+                    return (0, 0)
+
+            self.replanning_cooldown = 20  # Tăng Cooldown lên 20
             self.last_replan_position = robot_pos
 
         # ------------------------------------------------------------------
-        # 3. PATH FOLLOWING + BACKTRACKING THÔNG MINH (QUAN TRỌNG NHẤT)
+        # 3. PATH FOLLOWING SỬ DỤNG LOOKAHEAD POINT
         # ------------------------------------------------------------------
         if not self.current_path or self.target_waypoint_index >= len(self.current_path):
             return (0, 0)
 
+        # Cập nhật waypoint đã đến
         target_waypoint = self.current_path[self.target_waypoint_index]
         dist_to_waypoint = np.hypot(robot_pos[0] - target_waypoint[0],
                                     robot_pos[1] - target_waypoint[1])
 
-        # Đi tới waypoint tiếp theo
         if dist_to_waypoint < self.waypoint_threshold:
             self.target_waypoint_index += 1
             if self.target_waypoint_index >= len(self.current_path):
                 return (0, 0)
-            target_waypoint = self.current_path[self.target_waypoint_index]
 
-        # Tính hướng mong muốn
-        dx = target_waypoint[0] - robot_pos[0]
-        dy = target_waypoint[1] - robot_pos[1]
+        # Chọn lookahead point
+        lookahead_dist = self.cell_size * 4
+        target_point = self._get_lookahead_point(robot_pos, lookahead_dist)
+
+        dx = target_point[0] - robot_pos[0]
+        dy = target_point[1] - robot_pos[1]
         desired_angle = np.arctan2(dy, dx)
 
         # ------------------------------------------------------------------
-        # 4. ƯU TIÊN HƯỚNG LÙI KHI KHÔNG CÓ HƯỚNG NÀO TỐT
+        # 4. CHỌN HƯỚNG DI CHUYỂN AN TOÀN
         # ------------------------------------------------------------------
         valid_moves = [(d, self._is_move_safe(robot, d, static_obstacles)) for d in self.directions]
         safe_directions = [d for d, safe in valid_moves if safe]
@@ -381,50 +387,87 @@ class IndoorAdaptedController(Controller):
                                np.arctan2(d[1], d[0]) - desired_angle)))
             self.previous_direction = best_dir
             return best_dir
+
+        # ------------------------------------------------------------------
+        # 5. CƠ CHẾ THOÁT HIỂM TỨC THỜI (Soft Backtracking)
+        # ------------------------------------------------------------------
         else:
-            # KHÔNG CÓ HƯỚNG NÀO AN TOÀN → CHO PHÉP LÙI THEO ĐƯỜNG CŨ (rất quan trọng!)
-            if len(self.current_path) > max(2, self.target_waypoint_index - 5):
-                # Quay lại 2-3 waypoint trước đó
-                back_idx = max(1, self.target_waypoint_index - 2)
-                back_point = self.current_path[back_idx]
-                back_dx = back_point[0] - robot_pos[0]
-                back_dy = back_point[1] - robot_pos[1]
-                back_angle = np.arctan2(back_dy, back_dx)
+            # Tìm hướng ngược lại với hướng di chuyển gần nhất (hoặc ngẫu nhiên)
+            if self.previous_direction != (0, 0):
+                back_dir = (-self.previous_direction[0], -self.previous_direction[1])
+            else:
+                back_dir = random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
 
-                # Tìm hướng grid gần nhất với hướng lùi
-                back_dir = min(self.directions,
-                               key=lambda d: abs(self._normalize_angle(
-                                   np.arctan2(d[1], d[0]) - back_angle)))
+            # Chỉ lùi nếu hướng đó an toàn
+            if self._is_move_safe(robot, back_dir, static_obstacles):
+                print("Lùi tức thời (Soft Backtrack) để thoát va chạm")
+                # KHÔNG thay đổi self.target_waypoint_index để giữ mục tiêu phía trước
+                return back_dir
 
-                # Kiểm tra thật kỹ hướng lùi có thực sự an toàn không
-                if self._is_move_safe(robot, back_dir, static_obstacles):
-                    print("BACKTRACKING! Quay đầu thoát ngõ cụt")
-                    self.target_waypoint_index = back_idx  # ép nhảy lùi về waypoint cũ
-                    return back_dir
-
-            # Vẫn không được → đứng im 1 frame
+                # Vẫn không được → đứng im
+            print("Toàn bộ hướng bị chặn → Đứng im chờ replan")
             return (0, 0)
 
-    def _angle_to_grid_direction(self, target_angle, robot, static_obstacles):
-        """Chuyển góc sang grid direction an toàn gần nhất"""
-        valid_directions = []
+    def _get_lookahead_point(self, robot_pos, lookahead_dist):
+        """Tính toán điểm nhìn trước trên đường đi."""
+        current_node = robot_pos
+        lookahead_index = self.target_waypoint_index
+        total_dist = 0
 
-        for direction in self.directions:
-            if self._is_move_safe(robot, direction, static_obstacles):
-                dir_angle = np.arctan2(direction[1], direction[0])
-                angle_diff = abs(self._normalize_angle(target_angle - dir_angle))
-                valid_directions.append((direction, angle_diff))
+        while lookahead_index < len(self.current_path):
+            next_waypoint = self.current_path[lookahead_index]
+            segment_dist = np.hypot(current_node[0] - next_waypoint[0], current_node[1] - next_waypoint[1])
 
-        if not valid_directions:
-            # Không có hướng an toàn, thử lùi lại
-            for direction in self.directions:
-                if self._is_move_safe(robot, direction, static_obstacles):
-                    return direction
-            return (0, 0)
+            if total_dist + segment_dist >= lookahead_dist:
+                # Lookahead point nằm trên đoạn này
+                fraction = (lookahead_dist - total_dist) / segment_dist
+                lookahead_x = current_node[0] + fraction * (next_waypoint[0] - current_node[0])
+                lookahead_y = current_node[1] + fraction * (next_waypoint[1] - current_node[1])
+                return (lookahead_x, lookahead_y)
 
-        # Chọn hướng gần target_angle nhất
-        best_direction = min(valid_directions, key=lambda x: x[1])[0]
-        return best_direction
+            total_dist += segment_dist
+            current_node = next_waypoint
+            lookahead_index += 1
+
+        # Nếu không đủ path, dùng waypoint cuối cùng
+        return self.current_path[-1]
+
+    def _update_stuck_detection(self, robot_pos):
+        """
+        Phát hiện robot bị kẹt. Đã giảm hình phạt và tăng cửa sổ kiểm tra
+        để tránh phản ứng thái quá.
+        """
+        self.position_history.append(robot_pos)
+        if len(self.position_history) > 40:
+            self.position_history.pop(0)
+
+        # 1. Phát hiện kẹt (Đi vòng/Đi loanh quanh)
+        if len(self.position_history) >= 40:
+            recent_positions = self.position_history[-40:]
+
+            unique_cells = set([
+                (int(p[0] / (self.cell_size * 2)), int(p[1] / (self.cell_size * 2)))
+                for p in recent_positions
+            ])
+
+            # Chỉ tăng 1 điểm phạt khi ở trong 3 khu vực lớn trở xuống trong 40 bước
+            if len(unique_cells) <= 3:
+                self.stuck_counter += 1
+            else:
+                self.stuck_counter = max(0, self.stuck_counter - 1)
+
+        # 2. Phát hiện kẹt (Di chuyển chậm)
+        if self.last_position is not None:
+            dist_moved = np.linalg.norm(
+                np.array(robot_pos) - np.array(self.last_position)
+            )
+
+            if dist_moved < 0.1 * self.cell_size:
+                self.stuck_counter += 1
+            else:
+                self.stuck_counter = max(0, self.stuck_counter - 1)
+
+        self.last_position = robot_pos
 
     def _is_move_safe(self, robot, direction, static_obstacles):
         """Kiểm tra di chuyển có an toàn không"""
@@ -462,7 +505,7 @@ class IndoorAdaptedController(Controller):
         return (distance_x ** 2 + distance_y ** 2) < (circle_radius ** 2)
 
     def _update_obstacle_memory(self, static_obstacles):
-        """Cập nhật bộ nhớ vật cản tĩnh"""
+        """Cập nhật bộ nhớ vật cản tĩnh (Chỉ lưu vật cản vật lý)"""
         for obs in static_obstacles:
             is_known = False
             for known_obs in self.known_static_obstacles:
@@ -472,35 +515,6 @@ class IndoorAdaptedController(Controller):
 
             if not is_known:
                 self.known_static_obstacles.append(obs)
-
-    def _update_stuck_detection(self, robot_pos):
-        """Phát hiện robot bị kẹt (đi vòng)"""
-        self.position_history.append(robot_pos)
-        if len(self.position_history) > 50:
-            self.position_history.pop(0)
-
-        if len(self.position_history) >= 30:
-            # Kiểm tra xem có đi vòng không
-            recent_positions = self.position_history[-30:]
-            unique_positions = set([
-                (int(p[0] / self.cell_size), int(p[1] / self.cell_size))
-                for p in recent_positions
-            ])
-
-            if len(unique_positions) < 5:  # Chỉ ở trong 5 cell
-                self.stuck_counter += 1
-            else:
-                self.stuck_counter = 0
-
-        # Kiểm tra di chuyển chậm
-        if self.last_position is not None:
-            dist_moved = np.linalg.norm(
-                np.array(robot_pos) - np.array(self.last_position)
-            )
-            if dist_moved < 0.5:
-                self.stuck_counter += 1
-
-        self.last_position = robot_pos
 
     def _is_path_blocked(self, robot_pos, obstacles):
         """Kiểm tra path có bị chặn không"""
