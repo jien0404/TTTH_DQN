@@ -6,9 +6,15 @@ import os
 import time
 from Robot import Robot
 from Obstacle import Obstacle
-from controller.WaitingController import WaitingController # Import controller mới
+from controller.SmartAvoidanceController import SmartAvoidanceController # Import controller mới
+from controller.DeterministicRRTController import DeterministicRRTController
 from Colors import *
 from MapData import maps
+
+AVAILABLE_CONTROLLERS = {
+    "SmartAvoidanceController": SmartAvoidanceController,
+    "DeterministicRRTController": DeterministicRRTController
+}
 
 # ==============================================================================
 # CÁC THAM SỐ VÀ HÀM TIỆN ÍCH (Giống main.py cũ)
@@ -21,6 +27,19 @@ GRID_WIDTH = env_size // cell_size
 GRID_HEIGHT = env_size // cell_size
 WINDOW_WIDTH = env_size + 2 * env_padding
 WINDOW_HEIGHT = env_size + 2 * env_padding + 3 * env_padding
+
+def select_controller():
+    print("\nAvailable controllers:")
+    keys = list(AVAILABLE_CONTROLLERS.keys())
+    for i, name in enumerate(keys):
+        print(f"{i+1}. {name}")
+    while True:
+        try:
+            choice = int(input(f"Select controller (1-{len(keys)}): "))
+            if 1 <= choice <= len(keys): 
+                name = keys[choice-1]
+                return AVAILABLE_CONTROLLERS[name], name
+        except ValueError: print("Please enter a valid number")
 
 def select_map():
     print("Available maps:")
@@ -38,8 +57,9 @@ def select_map():
 # ==============================================================================
 
 class TestEnvironment:
-    def __init__(self, selected_map, controller_name):
+    def __init__(self, selected_map, controller_class, controller_name):
         self.map_name = selected_map
+        self.controller_class = controller_class
         self.controller_name = controller_name
         
         # Tạo thư mục lưu kết quả nếu chưa có
@@ -69,8 +89,12 @@ class TestEnvironment:
         self.obstacles = [Obstacle(**obs_data) for obs_data in self.map_data["Obstacles"]]
         
         # Khởi tạo controller được chỉ định
-        if self.controller_name == "WaitingController":
-            self.controller = WaitingController(self.goal, cell_size, env_padding, GRID_WIDTH, GRID_HEIGHT)
+        if self.controller_name == "SmartAvoidanceController":
+            self.controller = SmartAvoidanceController(self.goal, cell_size, env_padding, GRID_WIDTH, GRID_HEIGHT)
+        elif self.controller_name == "DeterministicRRTController":
+            self.controller = DeterministicRRTController(
+                self.goal, cell_size, env_padding, GRID_WIDTH, GRID_HEIGHT
+            )
         else:
             raise ValueError(f"Controller {self.controller_name} not supported in this script.")
             
@@ -174,11 +198,11 @@ class TestEnvironment:
 
 def main():
     selected_map = select_map()
-    controller_name = "WaitingController" # Chỉ chạy controller này
+    controller_class, controller_name = select_controller()
     
     num_episodes = int(input("Enter number of test episodes (default 10): ") or "10")
 
-    env = TestEnvironment(selected_map, controller_name)
+    env = TestEnvironment(selected_map, controller_class, controller_name)
     env.run_test(num_episodes)
 
 if __name__ == "__main__":

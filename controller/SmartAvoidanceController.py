@@ -143,7 +143,7 @@ class WaitingRule:
 # ==============================================================================
 # 3. CONTROLLER CHÍNH
 # ==============================================================================
-class WaitingController(Controller):
+class SmartAvoidanceController(Controller):
     def __init__(self, goal, cell_size, env_padding, grid_width, grid_height, is_training=False, model_path=None):
         self.grid_width = grid_width
         self.grid_height = grid_height
