@@ -20,6 +20,19 @@ LEGEND_AREA_HEIGHT = 120
 WINDOW_WIDTH = env_size + 2 * env_padding
 WINDOW_HEIGHT = env_size + 2 * env_padding + LEGEND_AREA_HEIGHT
 
+PASTEL_COLORS = [
+    (66, 135, 245),   # xanh dương nhạt
+    (80, 200, 120),   # xanh lá pastel
+    (255, 105, 97),   # đỏ nhạt
+    (160, 108, 255),  # tím nhạt
+    (255, 179, 186),  # hồng pastel
+    (255, 127, 80),   # cam nhẹ (không vàng)
+    (100, 149, 237),  # xanh cornflower
+    (119, 221, 231),  # cyan pastel
+    (186, 255, 201),  # xanh mint
+    (255, 153, 204),  # hồng đậm pastel
+]
+
 def select_map():
     """Cho phép người dùng chọn một bản đồ để phân tích."""
     print("Available maps:")
@@ -119,7 +132,7 @@ class PathVisualizer:
         self.font = pygame.font.SysFont("arial", 18)
         
         self.obstacles = [Obstacle(**obs_data) for obs_data in self.map_data["Obstacles"]]
-        self.colors = [RED, GREEN, YELLOW]
+        self.colors = PASTEL_COLORS
 
     def draw_environment_base(self):
         # Nền trắng cho toàn bộ cửa sổ

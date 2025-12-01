@@ -1,4 +1,0 @@
-Controller,Success Rate (%),Avg Path Length (Success),Avg Total Angle (Success),Total Episodes
-DQNController,100.0,38.15377934798454,10.94085930618075,100
-ImprovedDQNController,11.0,52.34574308684812,22.56234763023385,100
-TransformerDQNController,0.0,0.0,0.0,100
