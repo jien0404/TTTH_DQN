@@ -131,7 +131,7 @@ class Environment:
         
         # Clock for FPS control
         self.clock = pygame.time.Clock()
-        self.FPS = 60 if not is_training else 240
+        self.FPS = 60 if not is_training else 480
 
     def setup_environment(self):
         # Get Start and Goal positions from map
@@ -212,7 +212,7 @@ class Environment:
         if self.controller_name != "DWAController" and not self.is_training:
             self.controller.load_model()
         
-        self.robot = Robot(self.start[0], self.start[1], cell_size, self.controller, vision=cell_size*2.5, radius=8, env_padding=env_padding)
+        self.robot = Robot(self.start[0], self.start[1], cell_size, self.controller, vision=cell_size*3, radius=5, env_padding=env_padding)
         
         # Robot path history
         self.robot_path = [(self.robot.x, self.robot.y)]
