@@ -11,13 +11,12 @@ import os
 from controller.Controller import Controller
 
 # ==============================================================================
-# 1. DUELING DQN (MẠNG NƠ-RON QUYẾT ĐỊNH)
+# 1. DUELING DQN (Bộ não xử lý tình huống động)
 # ==============================================================================
 class DuelingDQN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(DuelingDQN, self).__init__()
         
-        # Mạng đơn giản nhưng sâu để xử lý logic
         self.feature = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.ReLU(),
@@ -44,7 +43,7 @@ class DuelingDQN(nn.Module):
         return value + advantage - advantage.mean(dim=1, keepdim=True)
 
 # ==============================================================================
-# 2. A* PLANNER (GPS DẪN ĐƯỜNG)
+# 2. A* PLANNER (GPS chỉ đường tĩnh)
 # ==============================================================================
 class AStarPlanner:
     def __init__(self, resolution, padding):
@@ -52,7 +51,7 @@ class AStarPlanner:
         self.padding = padding
 
     def plan(self, start_pos, goal_pos, obstacles, grid_w, grid_h):
-        # Chuyển đổi toạ độ thực sang toạ độ Grid
+        # Chuyển đổi pixel sang grid
         start_node = (int((start_pos[0] - self.padding) // self.resolution),
                       int((start_pos[1] - self.padding) // self.resolution))
         goal_node = (int((goal_pos[0] - self.padding) // self.resolution),
@@ -60,15 +59,11 @@ class AStarPlanner:
 
         if start_node == goal_node: return [goal_pos]
 
-        # Chuẩn bị A*
         open_set = []
         heapq.heappush(open_set, (0, start_node))
         came_from = {}
         g_score = {start_node: 0}
-        f_score = {start_node: self._heuristic(start_node, goal_node)}
-        
-        # Tạo bản đồ tĩnh dạng grid để truy xuất nhanh (cache)
-        # Lưu ý: Hàm này giả định obstacles không thay đổi vị trí (Static only)
+        f_score = {start_node: math.hypot(start_node[0]-goal_node[0], start_node[1]-goal_node[1])}
         
         while open_set:
             current = heapq.heappop(open_set)[1]
@@ -76,13 +71,14 @@ class AStarPlanner:
             if current == goal_node:
                 return self._reconstruct_path(came_from, current, goal_pos)
 
+            # 8 hướng
             for dx, dy in [(0,1), (0,-1), (1,0), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)]:
                 neighbor = (current[0] + dx, current[1] + dy)
                 
                 # Check biên
                 if not (0 <= neighbor[0] < grid_w and 0 <= neighbor[1] < grid_h): continue
                 
-                # Check va chạm tĩnh (Tường đen)
+                # Check va chạm tĩnh (Chỉ check tường đen)
                 px = self.padding + (neighbor[0] + 0.5) * self.resolution
                 py = self.padding + (neighbor[1] + 0.5) * self.resolution
                 if self._is_colliding_static(px, py, obstacles): continue
@@ -92,17 +88,14 @@ class AStarPlanner:
                 if neighbor not in g_score or tentative_g < g_score[neighbor]:
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g
-                    f_score[neighbor] = tentative_g + self._heuristic(neighbor, goal_node)
+                    f_score[neighbor] = tentative_g + math.hypot(neighbor[0]-goal_node[0], neighbor[1]-goal_node[1])
                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
-                    
         return None 
 
-    def _heuristic(self, a, b):
-        return math.hypot(a[0] - b[0], a[1] - b[1])
-
     def _is_colliding_static(self, x, y, obstacles):
-        # Chỉ check vật cản tĩnh (Static = True)
-        point_rect = pygame.Rect(x-2, y-2, 4, 4)
+        # Check an toàn với margin lớn hơn một chút để A* không đi quá sát tường
+        margin = 1 
+        point_rect = pygame.Rect(x-margin, y-margin, margin*2, margin*2)
         for obs in obstacles:
             if obs.static:
                 obs_rect = pygame.Rect(obs.x - obs.width/2, obs.y - obs.height/2, obs.width, obs.height)
@@ -121,7 +114,7 @@ class AStarPlanner:
         return path
 
 # ==============================================================================
-# 3. HYBRID CONTROLLER (MAIN)
+# 3. HYBRID CONTROLLER
 # ==============================================================================
 class HybridGraphDQNController(Controller):
     def __init__(self, goal, cell_size, env_padding, grid_width, grid_height, is_training=True, model_path="hybrid_model.pth"):
@@ -130,16 +123,16 @@ class HybridGraphDQNController(Controller):
         self.grid_width = grid_width
         self.grid_height = grid_height
         
-        # --- Config Input ---
-        # 1. Local Vision (5x5 flatten) = 25
-        # 2. Distance to Target Waypoint = 1
-        # 3. Angle to Target Waypoint (sin, cos) = 2
-        # 4. Current Velocity (Last Action) = 2
+        # --- INPUT STATE ---
+        # 1. Vision 5x5 flattened (25)
+        # 2. Normalized Dist to Lookahead Point (1)
+        # 3. Sin/Cos Angle to Lookahead Point (2)
+        # 4. Last Action Velocity (2)
         # Total = 30
         self.state_dim = 30 
-        self.action_dim = 8 # 8 hướng
+        self.action_dim = 8
         
-        # --- Components ---
+        # --- INIT RL ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.q_network = DuelingDQN(self.state_dim, self.action_dim).to(self.device)
         self.target_network = DuelingDQN(self.state_dim, self.action_dim).to(self.device)
@@ -155,8 +148,9 @@ class HybridGraphDQNController(Controller):
         self.path_idx = 0
         self.last_action_vec = (0, 0)
         self.target_pt = goal
+        self.last_state_vec = None # Để lưu experience
         
-        # --- RL Params ---
+        # --- Params ---
         self.batch_size = 64
         self.gamma = 0.98
         self.epsilon = 1.0 if is_training else 0.05
@@ -168,76 +162,79 @@ class HybridGraphDQNController(Controller):
         if not is_training: self.load_model()
 
     def get_state_augmented(self, robot, obstacles):
-        # 1. Update Path (A*) nếu cần
+        # 1. Update Path A* nếu chưa có hoặc đã đi hết
         if not self.current_path or self.path_idx >= len(self.current_path):
             self.current_path = self.planner.plan((robot.x, robot.y), self.goal, obstacles, self.grid_width, self.grid_height)
             self.path_idx = 0
             
-        # 2. Tính toán "Look-ahead Target" (Điểm nhắm tới)
-        # Thay vì nhắm điểm kế tiếp, ta tìm điểm xa nhất trên path mà mắt thường nhìn thấy (Line of Sight)
-        # Điều này giúp làm mượt đường đi (Straight line shortcut)
+        # 2. Look-ahead Logic (Nhìn xa trông rộng)
+        # Tìm điểm xa nhất trên đường A* mà robot có thể nhắm tới để làm mượt đường đi
         target = self.goal
         if self.current_path:
-            # Tìm điểm gần nhất trên path
             closest_dist = float('inf')
             closest_idx = self.path_idx
-            for i in range(self.path_idx, min(len(self.current_path), self.path_idx + 10)):
+            
+            # Tìm điểm gần nhất trên path để sync lại vị trí robot
+            search_range = min(len(self.current_path), self.path_idx + 15)
+            for i in range(self.path_idx, search_range):
                 px, py = self.current_path[i]
                 d = math.hypot(px - robot.x, py - robot.y)
                 if d < closest_dist:
                     closest_dist = d
                     closest_idx = i
             
-            # Look ahead logic: Chọn điểm phía trước điểm gần nhất khoảng 3-4 bước
-            lookahead_idx = min(closest_idx + 3, len(self.current_path) - 1)
+            # Look ahead: Nhắm vào điểm cách điểm gần nhất khoảng 4-5 node
+            # Điều này giúp robot cắt cua mượt hơn thay vì đi vuông góc
+            lookahead_idx = min(closest_idx + 4, len(self.current_path) - 1)
             target = self.current_path[lookahead_idx]
-            self.path_idx = closest_idx # Cập nhật tiến độ
+            self.path_idx = closest_idx 
             self.target_pt = target
 
-        # 3. Tạo State Vector
-        # A. Local Vision (5x5 grid) - Chỉ quan tâm vật cản ĐỘNG và Tĩnh ở gần
+        # 3. Construct State
+        # A. Vision (5x5)
         local_grid, _ = robot.get_state(obstacles, self.grid_width, self.grid_height, self.goal, vision_size=5)
-        # get_state trả về -1 là tường, 0 là đường. Ta normalize về [0, 1] (1 là có vật cản)
         vision_flat = (local_grid == -1).astype(float).flatten() 
         
-        # B. Relative Info to Target
+        # B. Info to Target
         dx = target[0] - robot.x
         dy = target[1] - robot.y
-        dist_to_target = math.hypot(dx, dy)
-        angle_to_target = math.atan2(dy, dx)
+        dist = math.hypot(dx, dy)
+        angle = math.atan2(dy, dx)
         
-        # C. Last Action (Inertia)
-        last_dx, last_dy = self.last_action_vec
+        # C. Last Action
+        ldx, ldy = self.last_action_vec
         
         state_vec = np.concatenate([
             vision_flat,
-            [min(dist_to_target, 200) / 200.0], # Normalize dist
-            [math.sin(angle_to_target), math.cos(angle_to_target)],
-            [last_dx, last_dy]
+            [min(dist, 200) / 200.0],
+            [math.sin(angle), math.cos(angle)],
+            [ldx, ldy]
         ])
         
-        return state_vec, dist_to_target
+        return state_vec
 
     def make_decision(self, robot, obstacles):
-        state_vec, dist_to_target = self.get_state_augmented(robot, obstacles)
-        self.last_state_vec = state_vec # Lưu để train
+        state_vec = self.get_state_augmented(robot, obstacles)
+        self.last_state_vec = state_vec 
         
-        # Action Masking: Xác định hướng đi nào bị tường chặn
-        # Mask = 1 (Đi được), 0 (Đâm tường)
+        # --- ACTION MASKING (KỸ THUẬT QUAN TRỌNG) ---
+        # Chỉ cho phép chọn các hướng không đâm vào tường TĨNH
+        # Giúp model hội tụ cực nhanh vì không cần học lại các tai nạn ngớ ngẩn
         mask = np.ones(self.action_dim)
         for i, (dx, dy) in enumerate(self.directions):
             nx = robot.grid_x + dx
             ny = robot.grid_y + dy
             # Check biên
             if not (0 <= nx < self.grid_width and 0 <= ny < self.grid_height):
-                mask[i] = 0
-                continue
-            # Check tường tĩnh (Dùng hàm trong Robot hoặc tự check)
-            # Ở đây ta check nhanh bằng cách loop obstacles tĩnh
-            # (Hoặc tối ưu hơn là dùng grid map đã cache, nhưng loop cũng ok với số lượng ít)
-            n_px = self.env_padding + (nx + 0.5) * self.cell_size
-            n_py = self.env_padding + (ny + 0.5) * self.cell_size
-            rect = pygame.Rect(n_px - 2, n_py - 2, 4, 4)
+                mask[i] = 0; continue
+                
+            # Check tường tĩnh nhanh
+            px = self.env_padding + (nx + 0.5) * self.cell_size
+            py = self.env_padding + (ny + 0.5) * self.cell_size
+            # Tạo rect nhỏ kiểm tra va chạm
+            rect = pygame.Rect(px-2, py-2, 4, 4)
+            
+            # Lưu ý: Cần loop qua obstacles để check static
             for obs in obstacles:
                 if obs.static:
                     o_rect = pygame.Rect(obs.x - obs.width/2, obs.y - obs.height/2, obs.width, obs.height)
@@ -245,16 +242,16 @@ class HybridGraphDQNController(Controller):
                         mask[i] = 0
                         break
         
-        # Epsilon Greedy với Mask
+        # Epsilon-Greedy với Mask
         if self.is_training and random.random() < self.epsilon:
             valid_indices = [i for i, m in enumerate(mask) if m == 1]
             if valid_indices: action_idx = random.choice(valid_indices)
-            else: action_idx = 0 # Fallback
+            else: action_idx = 0 # Fallback (bị vây kín)
         else:
             state_tensor = torch.FloatTensor(state_vec).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 q_values = self.q_network(state_tensor).cpu().numpy().squeeze()
-                # Apply Mask: Gán giá trị cực thấp cho hành động bị cấm
+                # Phạt nặng các hành động bị mask
                 q_values[mask == 0] = -1e9
                 action_idx = np.argmax(q_values)
                 
@@ -263,65 +260,49 @@ class HybridGraphDQNController(Controller):
         return self.directions[action_idx]
 
     def calculate_reward(self, robot, obstacles, done, reached_goal, dist, prev_distance=None):
-        # Lưu ý: 'dist' ở đây là dist tới GOAL cuối cùng (từ main.py truyền vào)
-        # Ta cũng nên tính dist tới TARGET (waypoint) để thưởng cục bộ
-        
         reward = 0
-        
         if reached_goal: return 100.0
-        if done: return -50.0 # Collision
+        if done: return -50.0 
         
-        # 1. Alignment Reward (Thưởng đi đúng hướng về Waypoint)
-        # Tính lại vector tới waypoint (lấy từ self.target_pt đã tính ở get_state)
+        # 1. Alignment Reward (Thưởng đi đúng hướng theo A*)
+        # Đây là bí quyết giúp robot học nhanh: Thưởng khi vector di chuyển trùng với vector hướng về target
         tx, ty = self.target_pt
         desired_dx = tx - robot.x
         desired_dy = ty - robot.y
         
         actual_dx, actual_dy = self.last_action_vec
         
-        if np.linalg.norm([desired_dx, desired_dy]) > 0:
-            # Cosine similarity
-            v1 = np.array([desired_dx, desired_dy]) / np.linalg.norm([desired_dx, desired_dy])
-            v2 = np.array([actual_dx, actual_dy])
-            if np.linalg.norm(v2) > 0: v2 = v2 / np.linalg.norm(v2)
+        # Tính Cosine Similarity
+        des_norm = math.hypot(desired_dx, desired_dy)
+        act_norm = math.hypot(actual_dx, actual_dy)
+        
+        if des_norm > 0 and act_norm > 0:
+            alignment = (desired_dx*actual_dx + desired_dy*actual_dy) / (des_norm * act_norm)
+            reward += alignment * 0.5 
             
-            alignment = np.dot(v1, v2)
-            reward += alignment * 0.5 # Thưởng 0.5 nếu đi đúng hướng
-            
-        # 2. Penalty Step
+        # 2. Time Penalty (Khuyến khích đi nhanh)
         reward -= 0.05
         
-        # 3. Penalty Stagnation (Đứng yên)
-        if actual_dx == 0 and actual_dy == 0:
-            reward -= 0.2
-            
         return reward
 
     def store_experience(self, state, action_idx, reward, next_state, done):
-        # Hack nhẹ để tạo next_state vector vì main.py không trả về augmented state sau khi move
-        # Ta dùng kỹ thuật "1-step delay buffer" hoặc tính xấp xỉ.
-        # Ở đây ta dùng xấp xỉ đơn giản: State sau coi như giống state trước nhưng thay đổi vị trí
-        # (Để code ngắn gọn, ta lưu trực tiếp transition raw và xử lý sau hoặc chấp nhận sai số nhỏ ở next_state visual)
+        # Lưu experience vào buffer. Do cấu trúc main.py không trả về augmented next_state,
+        # ta dùng kỹ thuật lưu state t và coi next_state là state t+1 ở bước sau.
+        # Ở đây ta implement đơn giản: lưu last_state_vec
         
-        # Để chính xác, ta cần:
-        # State lưu vào buffer PHẢI là augmented state (30 dims)
-        # self.last_state_vec là state t.
+        if not hasattr(self, 'temp_transition'): self.temp_transition = None
         
-        # Ta tạo một bộ đệm đơn giản:
-        if not hasattr(self, 'temp_exp'): self.temp_exp = None
-        
-        if self.temp_exp:
-            # s_t, a_t, r_t -> s_{t+1} (là self.last_state_vec hiện tại)
-            s, a, r = self.temp_exp
+        if self.temp_transition:
+            s, a, r = self.temp_transition
+            # self.last_state_vec hiện tại chính là next_state của bước trước
             self.memory.append((s, a, r, self.last_state_vec, False))
             
         if done:
-            # Terminal state -> next state là chuỗi 0
             self.memory.append((self.last_state_vec, action_idx, reward, np.zeros(self.state_dim), True))
-            self.temp_exp = None
-            self.current_path = [] # Reset A* path
+            self.temp_transition = None
+            self.current_path = [] # Reset path khi hết episode
         else:
-            self.temp_exp = (self.last_state_vec, action_idx, reward)
+            self.temp_transition = (self.last_state_vec, action_idx, reward)
 
     def train(self):
         if len(self.memory) < self.batch_size: return
