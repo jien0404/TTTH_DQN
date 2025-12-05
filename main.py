@@ -15,6 +15,8 @@ from controller.DQN_PER_MTS import DQNPMController
 from controller.SDQN import SDQNController
 from controller.TransformerController import TransformerDQNController
 from controller.UltimateDQNController import UltimateDQNController
+from controller.AstarDQNCOntroller import AstarDQNCOntroller
+from controller.TransformerDQNController import TransformerDQNController
 from Colors import *
 from MapData import maps
 
@@ -38,7 +40,9 @@ def select_controller():
         6: "TransformerDQNController",
         7: "ImprovedDQNController",
         8: "AdvancedDQNController",
-        9: "UltimateDQNController"
+        9: "UltimateDQNController",
+        10: "AstarDQNCOntroller",
+        11: "TransformerDQNController", 
     }
     
     for idx, name in controllers.items():
@@ -203,6 +207,19 @@ class Environment:
                 is_training=self.is_training,
                 model_path=self.model_path
             )
+        elif self.controller_name == "AstarDQNCOntroller":
+            self.controller = AstarDQNCOntroller(
+                self.goal, cell_size, env_padding,
+                is_training=self.is_training,
+                model_path=self.model_path
+            )
+        elif self.controller_name == "TransformerDQNController":
+            self.controller = TransformerDQNController(
+                self.goal, cell_size, env_padding,
+                GRID_WIDTH, GRID_HEIGHT, # Controller này cần tham số Grid
+                is_training=self.is_training,
+                model_path=self.model_path
+            )
         else:
             # Default to ClassicalQL if controller not found
             print(f"Warning: Controller {self.controller_name} not recognized. Using ClassicalQL as default.")
@@ -270,7 +287,7 @@ class Environment:
             self.episode_steps = 0
             
             # Update epsilon
-            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController", "UltimateDQNController"]:
+            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController", "UltimateDQNController", "AstarDQNCOntroller", "TransformerDQNController"]:
                 self.controller.update_epsilon()
             else:
                 if reached_goal:
