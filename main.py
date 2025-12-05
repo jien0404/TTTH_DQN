@@ -17,6 +17,7 @@ from controller.TransformerController import TransformerDQNController
 from controller.UltimateDQNController import UltimateDQNController
 from controller.AstarDQNCOntroller import AstarDQNCOntroller
 from controller.TransformerDQNController import TransformerDQNController
+from controller.HybridGraphDQNController import HybridGraphDQNController
 from Colors import *
 from MapData import maps
 
@@ -42,7 +43,8 @@ def select_controller():
         8: "AdvancedDQNController",
         9: "UltimateDQNController",
         10: "AstarDQNCOntroller",
-        11: "TransformerDQNController", 
+        11: "TransformerDQNController",
+        12: "HybridGraphDQNController" 
     }
     
     for idx, name in controllers.items():
@@ -220,6 +222,13 @@ class Environment:
                 is_training=self.is_training,
                 model_path=self.model_path
             )
+        elif self.controller_name == "HybridGraphDQNController":
+            self.controller = HybridGraphDQNController(
+                self.goal, cell_size, env_padding,
+                GRID_WIDTH, GRID_HEIGHT,
+                is_training=self.is_training,
+                model_path=self.model_path
+            )
         else:
             # Default to ClassicalQL if controller not found
             print(f"Warning: Controller {self.controller_name} not recognized. Using ClassicalQL as default.")
@@ -287,7 +296,7 @@ class Environment:
             self.episode_steps = 0
             
             # Update epsilon
-            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController", "UltimateDQNController", "AstarDQNCOntroller", "TransformerDQNController"]:
+            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController", "UltimateDQNController", "AstarDQNCOntroller", "TransformerDQNController", "HybridGraphDQNController"]:
                 self.controller.update_epsilon()
             else:
                 if reached_goal:
