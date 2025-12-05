@@ -1,161 +1,233 @@
+import math
+import random
 import numpy as np
+import collections
+from collections import deque
 from controller.Controller import Controller
 
 
 class DWAController(Controller):
-    """Dynamic Window Approach (DWA) controller for robot path planning, non-learning algorithm."""
-    
-    def __init__(self, goal, cell_size, env_padding, is_training=False, model_path=None, max_speed_ratio=0.5, max_turn_rate=np.pi):
-        """
-        Initialize the DWA controller.
+    """
+    DWA + BFS escape:
+    - Bình thường: dùng DWA (mô phỏng horizon vài bước, chọn hướng tốt).
+    - Nếu bị kẹt (distance-to-goal không giảm nhiều bước / lặp lại ô cũ):
+        -> bật chế độ escape: tìm đường bằng BFS trong bán kính nhỏ rồi đi theo.
+    """
 
-        Args:
-            goal (tuple): Target position (x, y) to navigate towards.
-            cell_size (float): Size of each grid cell.
-            env_padding (float): Padding around the environment boundaries.
-            is_training (bool, optional): Training mode (always False for DWA). Defaults to False.
-            model_path (str, optional): Path to model (not used for DWA). Defaults to None.
-            max_speed_ratio (float, optional): Maximum linear speed ratio. Defaults to 0.5.
-            max_turn_rate (float, optional): Maximum angular speed (rad/s). Defaults to np.pi.
-        """
+    def __init__(self, goal, cell_size, env_padding,
+                 is_training=False, model_path=None,
+                 clearance_weight=0.6, heading_weight=1.0, velocity_weight=0.1,
+                 horizon_steps=5,
+                 stuck_threshold=8, bfs_radius=15):
         super().__init__(goal, cell_size, env_padding, is_training, model_path)
-        self.max_speed_ratio = max_speed_ratio
-        self.max_turn_rate = max_turn_rate
 
-    def _initialize_algorithm(self):
-        """Initialize algorithm-specific components (none for DWA)."""
-        pass
+        self.base_dirs = [
+            (0, -1), (1, -1), (1, 0), (1, 1),
+            (0, 1), (-1, 1), (-1, 0), (-1, -1)
+        ]
 
-    def make_decision(self, robot, obstacles):
-        """
-        Make a control decision considering obstacles.
+        self.clearance_weight = clearance_weight
+        self.heading_weight = heading_weight
+        self.velocity_weight = velocity_weight
+        self.horizon_steps = max(1, horizon_steps)
 
-        Args:
-            robot: Robot object with position (robot.pos) and vision (robot.vision).
-            obstacles: List of Obstacle objects.
+        # trạng thái để phát hiện kẹt
+        self.last_dir = (1, 0)
+        self.last_goal_dist = None
+        self.stuck_steps = 0
+        self.stuck_threshold = stuck_threshold
+        self.recent_cells = collections.deque(maxlen=20)
+        self.bfs_radius = bfs_radius
 
-        Returns:
-            tuple: Direction (dx, dy) from self.directions.
-        """
-        # Prepare obstacle positions in format [x, y, width, height]
-        obstacle_positions = [obs.get_bounding_box() for obs in obstacles]
-        
-        # Generate feasible velocity commands
-        valid_speeds = np.linspace(0, self.max_speed_ratio, num=4)
-        valid_turn_rates = np.linspace(-self.max_turn_rate, self.max_turn_rate, num=9)
+    # ------------ utils ------------
+    def _to_grid_dir(self, d):
+        dx = int(round(d[0]))
+        dy = int(round(d[1]))
+        dx = max(-1, min(1, dx))
+        dy = max(-1, min(1, dy))
+        if dx == 0 and dy == 0:
+            return (1, 0)
+        return (dx, dy)
 
-        # Initialize best commands
-        best_cmd = (0, 0)
-        best_score = float('-inf')
-        robot_pose = (robot.x, robot.y)
+    def _will_collide_one_step(self, robot, gx, gy, obstacles):
+        try:
+            return robot.is_grid_cell_blocked(obstacles, gx, gy)
+        except Exception:
+            return True
 
-        # Iterate through feasible velocity commands
-        for v in valid_speeds:
-            for w in valid_turn_rates:
-                # Simulate motion
-                simulated_trajectory = self.simulate_motion(robot_pose, v, w)
+    # ------------ DWA core ------------
+    def _simulate_trajectory(self, robot, d, obstacles, goal_grid):
+        cx, cy = robot.grid_x, robot.grid_y
+        dx, dy = d
+        steps_free = 0
+        gx, gy = cx, cy
 
-                # Evaluate trajectory
-                score = self.evaluate_trajectory(simulated_trajectory, obstacle_positions, robot.vision * 0.75)
+        for step in range(1, self.horizon_steps + 1):
+            nx = cx + dx * step
+            ny = cy + dy * step
+            if self._will_collide_one_step(robot, nx, ny, obstacles):
+                return True, (gx, gy), steps_free
+            gx, gy = nx, ny
+            steps_free += 1
 
-                # Update best commands if score is better
-                if score > best_score:
-                    best_score = score
-                    best_cmd = (v, w)
+        return False, (gx, gy), steps_free
 
-        # Convert best command to direction (dx, dy)
-        direction = (best_cmd[0] * np.cos(best_cmd[1]), best_cmd[0] * np.sin(best_cmd[1]))
+    def _evaluate_velocity(self, robot, d, obstacles, goal_grid):
+        collision, final_pos, steps_free = self._simulate_trajectory(
+            robot, d, obstacles, goal_grid
+        )
+        if collision and steps_free == 0:
+            return -9999.0
 
-        # Map to closest discrete direction
-        closest_direction = min(self.directions, key=lambda d: np.linalg.norm(np.array(d) - np.array(direction)))
-        return closest_direction
+        fx, fy = final_pos
+        gx, gy = goal_grid
+        dist = abs(fx - gx) + abs(fy - gy)
+        heading_score = -dist
+        clearance_score = steps_free
 
-    def simulate_motion(self, pose, v, w):
-        """
-        Simulate robot motion given current pose and velocity commands.
+        vx, vy = d
+        lx, ly = self.last_dir
+        dot = vx * lx + vy * ly
+        velocity_score = dot
 
-        Args:
-            pose (tuple): Current robot position (x, y).
-            v (float): Linear velocity.
-            w (float): Angular velocity (used as orientation angle).
-
-        Returns:
-            list: Simulated next position [x, y].
-        """
-        new_x = pose[0] + v * np.cos(w) * self.cell_size
-        new_y = pose[1] + v * np.sin(w) * self.cell_size
-        return [new_x, new_y]
-
-    def evaluate_trajectory(self, trajectory, obstacles, safety_distance):
-        """
-        Evaluate a trajectory based on distance to goal and obstacle avoidance.
-
-        Args:
-            trajectory (list): Simulated position [x, y].
-            obstacles (list): List of obstacles as [x_min, x_max, y_min, y_max].
-            safety_distance (float): Minimum safe distance to obstacles.
-
-        Returns:
-            float: Score of the trajectory.
-        """
-        distance_to_goal = np.linalg.norm(np.array(trajectory) - np.array(self.goal))
-        score = 1.0 / (distance_to_goal + 1)  # Penalize distance to goal
-        for obstacle in obstacles:
-            closest_x = max(obstacle[0], min(trajectory[0], obstacle[1]))
-            closest_y = max(obstacle[2], min(trajectory[1], obstacle[3]))
-            dist_to_obstacle = ((closest_x - trajectory[0]) ** 2 + (closest_y - trajectory[1]) ** 2) ** 0.5
-            if dist_to_obstacle < safety_distance:
-                score -= 10.0
+        score = (
+            self.heading_weight * heading_score
+            + self.clearance_weight * clearance_score
+            + self.velocity_weight * velocity_score
+        )
         return score
 
-    def store_experience(self, state, action_idx, reward, next_state, done):
+    # ------------ BFS escape ------------
+    def _bfs_escape_step(self, robot, obstacles, goal_grid):
         """
-        Store experience in memory (not applicable for DWA).
-
-        Args:
-            state: Current state.
-            action_idx: Action index.
-            reward: Reward received.
-            next_state: Next state.
-            done: Whether episode is done.
+        BFS trong bán kính bfs_radius quanh robot.
+        - Nếu tìm được đường tới goal -> đi bước đầu tiên.
+        - Nếu không, chọn node trong vùng BFS gần goal nhất -> đi theo hướng về node đó.
         """
-        pass  # DWA does not use experience replay
+        start = (robot.grid_x, robot.grid_y)
+        gx, gy = goal_grid
 
-    def train(self):
-        """Perform a training step (not applicable for DWA)."""
-        pass  # DWA does not train
+        q = deque()
+        q.append(start)
+        visited = {start}
+        parent = {}
 
-    def update_epsilon(self):
-        """Update exploration rate (not applicable for DWA)."""
-        pass  # DWA does not use exploration
+        best_node = start
+        best_dist = abs(start[0] - gx) + abs(start[1] - gy)
 
-    def calculate_reward(self, robot, obstacles, done, reached_goal, distance_to_goal, prev_distance=None):
-        """
-        Calculate reward for the current state.
+        while q:
+            x, y = q.popleft()
 
-        Args:
-            robot: Robot object.
-            obstacles: List of Obstacle objects.
-            done: Whether the episode is done.
-            reached_goal: Whether the goal was reached.
-            distance_to_goal: Current distance to goal.
-            prev_distance: Previous distance to goal.
+            # giới hạn bán kính
+            if abs(x - start[0]) + abs(y - start[1]) > self.bfs_radius:
+                continue
 
-        Returns:
-            float: Calculated reward.
-        """
-        if reached_goal:
-            return 100.0  # Large positive reward for reaching goal
-        if robot.check_collision(obstacles):
-            return -100.0  # Large negative reward for collision
-        if prev_distance is not None and distance_to_goal < prev_distance:
-            return 10.0  # Positive reward for moving closer to goal
-        return -1.0  # Small negative reward for each step
+            cur_dist = abs(x - gx) + abs(y - gy)
+            if cur_dist < best_dist:
+                best_dist = cur_dist
+                best_node = (x, y)
 
-    def _save_model_implementation(self):
-        """Implement model saving (not applicable for DWA)."""
-        print("DWAController does not use a model to save.")
+            if (x, y) == goal_grid:
+                best_node = (x, y)
+                break
 
-    def _load_model_implementation(self):
-        """Implement model loading (not applicable for DWA)."""
-        print("DWAController does not use a model to load.")
+            for d in self.base_dirs:
+                nx, ny = x + d[0], y + d[1]
+                if (nx, ny) in visited:
+                    continue
+                try:
+                    blocked = robot.is_grid_cell_blocked(obstacles, nx, ny)
+                except Exception:
+                    blocked = True
+                if blocked:
+                    continue
+                visited.add((nx, ny))
+                parent[(nx, ny)] = (x, y)
+                q.append((nx, ny))
+
+        # nếu best_node vẫn là start -> bất lực
+        if best_node == start:
+            return None
+
+        # truy vết đường từ start -> best_node, lấy bước đầu tiên
+        cur = best_node
+        path = []
+        while cur != start:
+            path.append(cur)
+            cur = parent[cur]
+        path.reverse()
+        first = path[0]
+        dx = first[0] - start[0]
+        dy = first[1] - start[1]
+        return self._to_grid_dir((dx, dy))
+
+    # ------------ stuck detection ------------
+    def _update_stuck_state(self, robot, goal_grid):
+        gx, gy = goal_grid
+        cur_dist = abs(robot.grid_x - gx) + abs(robot.grid_y - gy)
+
+        # lưu lịch sử ô
+        cell = (robot.grid_x, robot.grid_y)
+        self.recent_cells.append(cell)
+
+        if self.last_goal_dist is None:
+            self.last_goal_dist = cur_dist
+            return
+
+        # nếu không tiến gần hơn -> tăng stuck_steps
+        if cur_dist >= self.last_goal_dist:
+            self.stuck_steps += 1
+        else:
+            self.stuck_steps = 0
+
+        self.last_goal_dist = cur_dist
+
+        # nếu lặp lại cùng một ô nhiều lần -> cũng coi như bị kẹt
+        if self.recent_cells.count(cell) >= 3:
+            self.stuck_steps += 1
+
+    def _is_stuck(self):
+        return self.stuck_steps >= self.stuck_threshold
+
+    # ------------ MAIN ------------
+    def make_decision(self, robot, obstacles):
+        gx_pixel, gy_pixel = self.goal
+
+        goal_grid_x = int((gx_pixel - robot.env_padding) // robot.cell_size)
+        goal_grid_y = int((gy_pixel - robot.env_padding) // robot.cell_size)
+        goal_grid = (goal_grid_x, goal_grid_y)
+
+        dist_goal_grid = abs(robot.grid_x - goal_grid_x) + abs(robot.grid_y - goal_grid_y)
+        if dist_goal_grid == 0:
+            return (0, 0)
+
+        # cập nhật trạng thái kẹt
+        self._update_stuck_state(robot, goal_grid)
+
+        # 1) nếu đang kẹt -> thử BFS escape trước
+        if self._is_stuck():
+            escape_dir = self._bfs_escape_step(robot, obstacles, goal_grid)
+            if escape_dir is not None:
+                # reset một chút để tránh BFS spam
+                self.stuck_steps = 0
+                self.last_dir = escape_dir
+                return escape_dir
+            # nếu BFS cũng bó tay thì vẫn rơi xuống DWA ở dưới
+
+        # 2) DWA bình thường
+        best_dir = None
+        best_score = -1e9
+
+        for d in self.base_dirs:
+            score = self._evaluate_velocity(robot, d, obstacles, goal_grid)
+            if score > best_score:
+                best_score = score
+                best_dir = d
+
+        if best_dir is None or best_score <= -9990:
+            # cuối cùng vẫn tịt -> đứng yên
+            return (0, 0)
+
+        best_dir = self._to_grid_dir(best_dir)
+        self.last_dir = best_dir
+        return best_dir
