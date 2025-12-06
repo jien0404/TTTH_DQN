@@ -1,0 +1,4 @@
+Controller,Success Rate (%),Avg Length (px),Avg Angle (deg),Runs
+TransformerDQNController,85.8,695.1341499082642,23.8512716043219,500
+SmartAvoidanceController,82.8,711.1084697588924,22.196990487334208,500
+DWAController,46.2,673.8704591016673,16.032235474835094,500
