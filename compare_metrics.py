@@ -393,7 +393,7 @@ def select_map():
 
 def main():
     selected_map = select_map()
-    base_results_path = f"results_report/{selected_map}"
+    base_results_path = f"results_report_2/{selected_map}"
     
     if not os.path.exists(base_results_path):
         print(f"Results directory not found: {base_results_path}")
@@ -433,7 +433,7 @@ def main():
     df = df.sort_values(by=["Success Rate (%)", "Avg Length (px)"], ascending=[False, True])
 
     # Setup thư mục output
-    output_dir = f"metrics_report/{selected_map}"
+    output_dir = f"metrics_report_2/{selected_map}"
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 

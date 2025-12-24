@@ -74,6 +74,22 @@ class AStarPlanner:
         path.reverse()
         path.append(goal_pos)
         return path
+    
+    def smooth_path(self, path, weight_data=0.5, weight_smooth=0.3, tolerance=0.00001):
+        """Làm mượt path bằng gradient descent"""
+        if len(path) < 3: return path
+        
+        new_path = np.array(path, dtype=float)
+        change = tolerance
+        while change >= tolerance:
+            change = 0.0
+            for i in range(1, len(path) - 1):
+                for j in range(2):
+                    aux = new_path[i][j]
+                    new_path[i][j] += weight_data * (path[i][j] - new_path[i][j])
+                    new_path[i][j] += weight_smooth * (new_path[i-1][j] + new_path[i+1][j] - 2*new_path[i][j])
+                    change += abs(aux - new_path[i][j])
+        return [tuple(p) for p in new_path]
 
 class SafetyModule:
     """Lớp bảo vệ: Ngăn chặn hành động tự sát"""
@@ -291,18 +307,28 @@ class TransformerDQNController(Controller):
         # Logic bám waypoint
         target_pt = self.goal
         if self.current_path:
-            # Tìm điểm gần nhất trên path
+            # Smooth path nếu chưa smooth
+            if not hasattr(self, '_smoothed_path') or self._path_version != id(self.current_path):
+                self._smoothed_path = self.smooth_path(self.current_path)
+                self._path_version = id(self.current_path)
+            
+            path_to_use = self._smoothed_path if hasattr(self, '_smoothed_path') else self.current_path
+            
+            # Tìm điểm gần nhất
             closest_dist = float('inf')
             closest_idx = self.path_index
-            for i in range(self.path_index, min(len(self.current_path), self.path_index + 5)):
-                px, py = self.current_path[i]
+            for i in range(self.path_index, min(len(path_to_use), self.path_index + 8)):
+                px, py = path_to_use[i]
                 d = math.hypot(px - robot.x, py - robot.y)
                 if d < closest_dist:
                     closest_dist = d
                     closest_idx = i
-            # Lookahead 2 bước
-            target_idx = min(closest_idx + 2, len(self.current_path) - 1)
-            target_pt = self.current_path[target_idx]
+            
+            # === LOOKAHEAD ĐỘNG (thay vì cố định 2) ===
+            robot_speed = math.hypot(robot.vx, robot.vy) if hasattr(robot, 'vx') else 5.0
+            lookahead_steps = max(3, min(int(robot_speed / self.cell_size * 2), 6))
+            target_idx = min(closest_idx + lookahead_steps, len(path_to_use) - 1)
+            target_pt = path_to_use[target_idx]
             self.path_index = closest_idx
 
         dx_w = target_pt[0] - robot.x
@@ -358,6 +384,24 @@ class TransformerDQNController(Controller):
                 masked_q = np.copy(q_values)
                 for i, safe in enumerate(safe_mask):
                     if not safe: masked_q[i] = -1e9
+
+                # === THÊM MOMENTUM BONUS ===
+                momentum_bonus = 0.3  # Tăng giá trị này nếu muốn mượt hơn
+                if hasattr(self, 'last_action_idx'):
+                    # Bonus cho action gần với last action
+                    for i in range(len(masked_q)):
+                        if masked_q[i] > -1e8:  # Action hợp lệ
+                            dx_curr = self.directions[i][0]
+                            dy_curr = self.directions[i][1]
+                            dx_last = self.directions[self.last_action_idx][0]
+                            dy_last = self.directions[self.last_action_idx][1]
+                            
+                            # Cosine similarity
+                            similarity = (dx_curr*dx_last + dy_curr*dy_last) / max(
+                                math.sqrt(dx_curr**2 + dy_curr**2) * math.sqrt(dx_last**2 + dy_last**2), 
+                                1e-6
+                            )
+                            masked_q[i] += momentum_bonus * similarity
                 
                 action_idx = np.argmax(masked_q)
                 # Fallback nếu kẹt cứng

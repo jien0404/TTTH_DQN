@@ -356,7 +356,7 @@ class PathVisualizer:
             current_y += line_h
 
     def save_and_show(self, suffix_tag):
-        output_dir = os.path.join("result_visualized_report", self.map_name)
+        output_dir = os.path.join("result_visualized_report_2", self.map_name)
         
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -388,7 +388,7 @@ class PathVisualizer:
 # ======================================================================
 def main():
     selected_map = select_map()
-    base_results_path = f"results_report/{selected_map}"
+    base_results_path = f"results_report_2/{selected_map}"
 
     if not os.path.exists(base_results_path):
         print(f"Error: Results directory not found for map '{selected_map}'")
