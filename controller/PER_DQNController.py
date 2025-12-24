@@ -93,7 +93,7 @@ class DuelingDQN(nn.Module):
         return q
 
 
-class ImprovedDQNController(Controller):
+class PER_DQNController(Controller):
     # SỬA: Thêm grid_width và grid_height vào constructor
     def __init__(self, goal, cell_size, env_padding, grid_width, grid_height, is_training=True, model_path="improved_dqn_model.pth"):
         # MỚI: Lưu lại grid size

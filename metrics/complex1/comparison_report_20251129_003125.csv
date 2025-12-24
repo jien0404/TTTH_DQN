@@ -1,3 +1,0 @@
-Controller,Success Rate (%),Avg Path Length (Success),Avg Total Angle (Success),Total Episodes
-DeterministicRRTController,25.0,40.65681958742129,9.833185283062317,100
-SmartAvoidanceController,82.8,44.444279359930775,14.097328251337272,500

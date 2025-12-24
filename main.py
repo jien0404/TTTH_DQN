@@ -5,20 +5,14 @@ import time
 import matplotlib.pyplot as plt
 from Robot import Robot
 from Obstacle import Obstacle
-from controller.AdvancedDQNController import AdvancedDQNController
 from controller.Controller import Controller
 from controller.DQNController import DQNController
-from controller.ImprovedDQNController import ImprovedDQNController
+from controller.PER_DQNController import PER_DQNController
 from controller.DFQL import DFQLController
 from controller.DWAController import DWAController
 from controller.DQN_PER_MTS import DQNPMController
 from controller.SDQN import SDQNController
-from controller.TransformerController import TransformerDQNController
-from controller.UltimateDQNController import UltimateDQNController
-from controller.AstarDQNCOntroller import AstarDQNCOntroller
 from controller.TransformerDQNController import TransformerDQNController
-from controller.HybridGraphDQNController import HybridGraphDQNController
-from controller.TransformerWaitingController import TransformerWaitingController
 from Colors import *
 from MapData import maps
 
@@ -39,14 +33,8 @@ def select_controller():
         3: "DWAController",
         4: "DQNPMController",
         5: "SDQNController",
-        6: "TransformerDQNController",
-        7: "ImprovedDQNController",
-        8: "AdvancedDQNController",
-        9: "UltimateDQNController",
-        10: "AstarDQNCOntroller",
-        11: "TransformerDQNController",
-        12: "HybridGraphDQNController",
-        13: "TransformerWaitingController" 
+        6: "PER_DQNController",
+        7: "TransformerDQNController"
     }
     
     for idx, name in controllers.items():
@@ -185,35 +173,10 @@ class Environment:
         elif self.controller_name == "DWAController":
             self.is_training = False  # DWAController only runs in test mode
             self.controller = DWAController(self.goal, cell_size, env_padding, is_training=self.is_training, model_path=self.model_path)
-        elif self.controller_name == "TransformerDQNController":
-            self.controller = TransformerDQNController(
+        elif self.controller_name == "PER_DQNController":
+            self.controller = PER_DQNController(
                 self.goal, cell_size, env_padding,
                 GRID_WIDTH, GRID_HEIGHT,
-                is_training=self.is_training,
-                model_path=self.model_path
-            )
-        elif self.controller_name == "ImprovedDQNController":
-            self.controller = ImprovedDQNController(
-                self.goal, cell_size, env_padding,
-                GRID_WIDTH, GRID_HEIGHT,
-                is_training=self.is_training,
-                model_path=self.model_path
-            )
-        elif self.controller_name == "AdvancedDQNController":
-            self.controller = AdvancedDQNController(
-                self.goal, cell_size, env_padding,is_training=self.is_training,
-                model_path=self.model_path
-            )
-        elif self.controller_name == "UltimateDQNController":
-            self.controller = UltimateDQNController(
-                self.goal, cell_size, env_padding,
-                GRID_WIDTH, GRID_HEIGHT, 
-                is_training=self.is_training,
-                model_path=self.model_path
-            )
-        elif self.controller_name == "AstarDQNCOntroller":
-            self.controller = AstarDQNCOntroller(
-                self.goal, cell_size, env_padding,
                 is_training=self.is_training,
                 model_path=self.model_path
             )
@@ -221,20 +184,6 @@ class Environment:
             self.controller = TransformerDQNController(
                 self.goal, cell_size, env_padding,
                 GRID_WIDTH, GRID_HEIGHT, # Controller này cần tham số Grid
-                is_training=self.is_training,
-                model_path=self.model_path
-            )
-        elif self.controller_name == "HybridGraphDQNController":
-            self.controller = HybridGraphDQNController(
-                self.goal, cell_size, env_padding,
-                GRID_WIDTH, GRID_HEIGHT,
-                is_training=self.is_training,
-                model_path=self.model_path
-            )
-        elif self.controller_name == "TransformerWaitingController":
-            self.controller = TransformerWaitingController(
-                self.goal, cell_size, env_padding,
-                GRID_WIDTH, GRID_HEIGHT,
                 is_training=self.is_training,
                 model_path=self.model_path
             )
@@ -305,7 +254,7 @@ class Environment:
             self.episode_steps = 0
             
             # Update epsilon
-            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "TransformerDQNController", "ImprovedDQNController", "UltimateDQNController", "AstarDQNCOntroller", "TransformerDQNController", "HybridGraphDQNController", "TransformerWaitingController"]:
+            if self.controller_name in ["DQNController", "DQNPMController", "SDQNController", "PER_DQNController", "TransformerDQNController"]:
                 self.controller.update_epsilon()
             else:
                 if reached_goal:
